@@ -1,0 +1,6 @@
+[package]
+name = "in_memory_key_value_store_fuse"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
