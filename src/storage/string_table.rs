@@ -1,7 +1,7 @@
 #[derive(Debug, PartialEq)]
 pub enum Error {
     OutOfMemory,
-    IndexOutOfBounds
+    IndexOutOfBounds,
 }
 
 #[derive(Debug)]
@@ -14,10 +14,14 @@ pub struct StringTable {
 impl StringTable {
     pub fn new(capacity: usize) -> Self {
         Self {
-            data: vec![0; capacity].into_boxed_slice(), 
+            data: vec![0; capacity].into_boxed_slice(),
             next: 0,
             capacity: capacity,
         }
+    }
+
+    pub fn get_next(&self) -> usize {
+        self.next
     }
 
     pub fn append(&mut self, bytes: &[u8]) -> Result<usize, Error> {
@@ -28,7 +32,7 @@ impl StringTable {
             // TODO: call eviction method here instead of returning an error
             return Err(Error::OutOfMemory);
         }
-        
+
         let offset = self.next;
         self.data[offset..offset + len].copy_from_slice(bytes);
         self.data[offset + len] = 0;
@@ -42,7 +46,6 @@ impl StringTable {
         if idx >= self.next {
             return Err(Error::IndexOutOfBounds);
         }
-
         let data = &self.data[..];
 
         let mut end = idx;
@@ -53,7 +56,6 @@ impl StringTable {
         Ok(&data[idx..end])
     }
 }
-
 
 #[cfg(test)]
 mod tests {
