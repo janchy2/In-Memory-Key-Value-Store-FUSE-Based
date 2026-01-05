@@ -1,3 +1,11 @@
+use crate::fuse::kvfs::KVFS;
+
+pub mod fuse;
+pub mod kv;
+pub mod storage;
+
 fn main() {
-    println!("Hello, world!");
+    let mountpoint = std::env::args().nth(1).expect("Usage: kvfs <MOUNTPOINT>");
+
+    KVFS::mount(&mountpoint);
 }

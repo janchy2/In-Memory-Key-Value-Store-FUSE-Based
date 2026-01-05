@@ -13,18 +13,18 @@ pub struct StringTable {
 
 impl StringTable {
     pub fn new(capacity: usize) -> Self {
+        // Capacity + 1 bytes is allocated because root is at index 1
+        let capacity = capacity + 1;
         Self {
+            // Capacity + 1 bytes is allocated because root is at index 1
             data: vec![0; capacity].into_boxed_slice(),
-            next: 0,
+            // Start from 1 because root key has to be at index 1
+            next: 1,
             capacity: capacity,
         }
     }
 
-    pub fn get_next(&self) -> usize {
-        self.next
-    }
-
-    pub fn append(&mut self, bytes: &[u8]) -> Result<usize, Error> {
+    pub fn append(&mut self, bytes: &[u8]) -> Result<u32, Error> {
         let len = bytes.len();
         let needed = len + 1;
 
@@ -39,10 +39,11 @@ impl StringTable {
 
         self.next = offset + needed;
 
-        Ok(offset)
+        Ok(offset as u32)
     }
 
-    pub fn get(&self, idx: usize) -> Result<&[u8], Error> {
+    pub fn get(&self, idx: u32) -> Result<&[u8], Error> {
+        let idx = idx as usize;
         if idx >= self.next {
             return Err(Error::IndexOutOfBounds);
         }
@@ -64,7 +65,7 @@ mod tests {
     #[test]
     fn append_stores_string_and_null_terminates() {
         let mut table = StringTable::new(5);
-        let idx = table.append(b"abc").unwrap();
+        let idx = table.append(b"abc").unwrap() as usize;
 
         assert_eq!(&table.data[idx..idx + 3], b"abc");
         assert_eq!(table.data[idx + 3], 0);
@@ -72,27 +73,27 @@ mod tests {
 
     #[test]
     fn append_multiple_strings_are_contiguous() {
-        let mut table = StringTable::new(5);
+        let mut table = StringTable::new(10);
         let a = table.append(b"a").unwrap();
         let b = table.append(b"bb").unwrap();
 
-        assert_eq!(a, 0);
-        assert_eq!(b, 2);
+        assert_eq!(a, 1);
+        assert_eq!(b, 3);
     }
 
     #[test]
     fn append_capacity_exceeded() {
-        let mut table = StringTable::new(2);
+        let mut table = StringTable::new(3);
         let a = table.append(b"a").unwrap();
         let b = table.append(b"bb");
 
-        assert_eq!(a, 0);
+        assert_eq!(a, 1);
         assert_eq!(b, Err(Error::OutOfMemory));
     }
 
     #[test]
     fn get_string_correct_index() {
-        let mut table = StringTable::new(10);
+        let mut table = StringTable::new(15);
         let a = table.append(b"a").unwrap();
         let b = table.append(b"bbbb").unwrap();
         let c = table.append(b"cc").unwrap();

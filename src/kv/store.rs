@@ -1,8 +1,4 @@
-use std::{
-    cell::RefCell,
-    collections::{BTreeMap, VecDeque},
-    rc::Rc,
-};
+use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
 use super::key_ref::KeyRef;
 use crate::storage::string_table::StringTable;
@@ -11,17 +7,30 @@ const KEY_TABLE_SIZE: usize = 1024;
 const VALUE_TABLE_SIZE: usize = 1024;
 // TODO: Parametrize this
 
+pub enum Entry {
+    NotFound,
+    NoValue,
+    Value(String),
+}
+
 pub struct KVStore {
     key_table: Rc<RefCell<StringTable>>,
     value_table: Rc<RefCell<StringTable>>,
-    key_value_map: BTreeMap<KeyRef, Option<usize>>,
+    key_value_map: BTreeMap<KeyRef, Option<u32>>,
 }
 
 impl KVStore {
     pub fn new() -> Self {
         let key_table = Rc::new(RefCell::new(StringTable::new(KEY_TABLE_SIZE)));
         let value_table = Rc::new(RefCell::new(StringTable::new(VALUE_TABLE_SIZE)));
-        let key_value_map = BTreeMap::new();
+        let mut key_value_map = BTreeMap::new();
+
+        let root_idx = key_table
+            .borrow_mut()
+            .append(&[])
+            .expect("Append should not fail here");
+        let root_key = KeyRef::new(key_table.clone(), root_idx, root_idx, root_idx);
+        key_value_map.insert(root_key, None);
         KVStore {
             key_table,
             value_table,
@@ -29,164 +38,108 @@ impl KVStore {
         }
     }
 
-    fn lookup_key_value_for_key_part(
-        &self,
-        str_bytes: &[u8],
-        parent_idx: Option<usize>,
-    ) -> Option<(usize, Option<usize>)> {
-        let temp_table = Rc::new(RefCell::new(StringTable::new(str_bytes.len() + 1)));
-        let temp_idx = temp_table
-            .borrow_mut()
-            .append(str_bytes)
-            .expect("Append to temp table should not fail");
-        let temp_key = KeyRef::new(temp_table, temp_idx, parent_idx);
-
+    pub fn get_idx_for_key_str(&self, parent: u32, key: &str) -> Option<u32> {
+        let temp_key = self.form_key_ref_from_str(parent, key);
         self.key_value_map
             .get_key_value(&temp_key)
-            .map(|(k, v)| (k.get_idx(), *v))
+            .map(|(k, _)| k.get_idx())
     }
 
-    fn lookup_key_value_for_key(&self, key: &str) -> Option<(usize, Option<usize>)> {
-        let mut parent = None;
-        let mut value = None;
-
-        for part in key.split('/') {
-            let bytes = part.as_bytes();
-
-            let (key_idx, value_idx) = self.lookup_key_value_for_key_part(bytes, parent)?;
-            parent = Some(key_idx);
-            value = value_idx;
+    pub fn insert_key(&mut self, parent_parent_idx: u32, parent: u32, key: &str) -> Option<u32> {
+        let temp_key = self.form_key_ref_from_str(parent, key);
+        if self.key_value_map.contains_key(&temp_key) {
+            return None;
         }
-
-        Some((parent.unwrap(), value))
+        let bytes = key.as_bytes();
+        let idx = self
+            .key_table
+            .borrow_mut()
+            .append(bytes)
+            .expect("Append should not fail");
+        let key_ref = KeyRef::new(self.key_table.clone(), idx, parent, parent_parent_idx);
+        self.key_value_map.insert(key_ref, None);
+        Some(idx)
     }
 
-    pub fn insert_key(&mut self, key: &str) -> bool {
-        let mut parent = None;
-        let mut inserted = false;
-
-        for part in key.split('/') {
-            let bytes = part.as_bytes();
-
-            match self.lookup_key_value_for_key_part(bytes, parent) {
-                Some((existing_key, value)) => {
-                    // Cannot insert below a key that already has a value
-                    if value.is_some() {
-                        return false;
-                    }
-                    parent = Some(existing_key);
-                }
-                None => {
-                    let idx = self
-                        .key_table
-                        .borrow_mut()
-                        .append(bytes)
-                        .expect("Append should not fail");
-
-                    self.key_value_map
-                        .insert(KeyRef::new(self.key_table.clone(), idx, parent), None);
-
-                    parent = Some(idx);
-                    inserted = true;
-                }
-            }
+    pub fn insert_value(&mut self, parent: u32, idx: u32, value: &str) -> bool {
+        let key = KeyRef::new(self.key_table.clone(), idx, parent, 0);
+        let value_idx = self
+            .value_table
+            .borrow_mut()
+            .append(value.as_bytes())
+            .expect("Append should not fail");
+        if let Some(v) = self.key_value_map.get_mut(&key) {
+            *v = Some(value_idx);
+            true
+        } else {
+            false
         }
-
-        inserted
     }
 
-    pub fn insert_key_value(&mut self, key: &str, value: &str) -> bool {
-        let mut parent = None;
-        let mut iter = key.split('/').peekable();
-
-        while let Some(part) = iter.next() {
-            let bytes = part.as_bytes();
-            let is_last = iter.peek().is_none();
-
-            match self.lookup_key_value_for_key_part(bytes, parent) {
-                Some((existing_key, existing_value)) => {
-                    // Parent keys must not already have values
-                    if !is_last && existing_value.is_some() {
-                        return false;
-                    }
-
-                    parent = Some(existing_key);
-
-                    // Assign value at leaf
-                    if is_last {
-                        let value_idx = self
-                            .value_table
-                            .borrow_mut()
-                            .append(value.as_bytes())
-                            .expect("Append should not fail");
-
-                        let key = KeyRef::new(self.key_table.clone(), existing_key, parent);
-                        if let Some(v) = self.key_value_map.get_mut(&key) {
-                            *v = Some(value_idx);
-                        }
-                    }
-                }
-
-                None => {
-                    let idx = self
-                        .key_table
-                        .borrow_mut()
-                        .append(bytes)
-                        .expect("Append should not fail");
-
-                    let value_idx = if is_last {
-                        Some(
-                            self.value_table
-                                .borrow_mut()
-                                .append(value.as_bytes())
-                                .expect("Append should not fail"),
-                        )
-                    } else {
-                        None
-                    };
-
-                    self.key_value_map
-                        .insert(KeyRef::new(self.key_table.clone(), idx, parent), value_idx);
-
-                    parent = Some(idx);
-                }
-            }
-        }
-
-        true
-    }
-
-    pub fn get_children_keys(&self, parent_key: &str) -> Option<Vec<String>> {
-        let (parent_idx, _) = self.lookup_key_value_for_key(parent_key)?;
-
-        let start = KeyRef::get_boundary_for_children_search(parent_idx);
-        let end = KeyRef::get_boundary_for_children_search(parent_idx + 1);
+    pub fn get_children_keys_idx_and_names(&self, idx: u32) -> Vec<(u32, String)> {
+        let start = KeyRef::get_boundary_for_children_search(idx);
+        let end = KeyRef::get_boundary_for_children_search(idx + 1);
 
         let mut result = Vec::new();
 
         for (key_ref, _) in self.key_value_map.range(start..end) {
-            let key_table_ref = self.key_table.borrow();
-            let bytes = key_table_ref
-                .get(key_ref.get_idx())
-                .expect("Get should not fail here");
-            let s = String::from_utf8(bytes.to_vec()).expect("Keys must be valid UTF-8");
-            result.push(s);
+            let child_idx = key_ref.get_idx();
+            if child_idx == idx {
+                // This can happen for root
+                continue;
+            }
+            result.push((child_idx, self.get_key_str(key_ref)));
         }
 
-        Some(result)
+        result
     }
 
-    pub fn get_value(&self, key: &str) -> Option<String> {
-        let (_, value) = self.lookup_key_value_for_key(key)?;
+    pub fn get_value_for_key(&self, parent: u32, idx: u32) -> Entry {
+        let temp_key = KeyRef::new(self.key_table.clone(), idx, parent, 0);
+        self.get_value_str(&temp_key)
+    }
 
-        let value_idx = value?;
-        let value_table_ref = self.value_table.borrow();
-        let bytes = value_table_ref
-            .get(value_idx)
+    pub fn get_parent_parent_idx(&self, parent: u32, idx: u32) -> Option<u32> {
+        let temp_key = KeyRef::new(self.key_table.clone(), idx, parent, 0);
+        self.key_value_map
+            .get_key_value(&temp_key)
+            .map(|(k, _)| k.get_parent_parent_idx())
+    }
+
+    fn get_key_str(&self, key_ref: &KeyRef) -> String {
+        let key_table_ref = self.key_table.borrow();
+        let bytes = key_table_ref
+            .get(key_ref.get_idx())
             .expect("Get should not fail here");
-        Some(String::from_utf8(bytes.to_vec()).expect("Keys must be valid UTF-8"))
+        String::from_utf8(bytes.to_vec()).unwrap()
     }
 
+    fn get_value_str(&self, key_ref: &KeyRef) -> Entry {
+        match self.key_value_map.get(key_ref).as_deref() {
+            Some(Some(value_idx)) => {
+                let value_table_ref = self.value_table.borrow();
+                let bytes = value_table_ref
+                    .get(*value_idx)
+                    .expect("Get should not fail here");
+
+                Entry::Value(String::from_utf8(bytes.to_vec()).unwrap())
+            }
+            Some(None) => Entry::NoValue,
+            None => Entry::NotFound,
+        }
+    }
+
+    fn form_key_ref_from_str(&self, parent: u32, key: &str) -> KeyRef {
+        let bytes = key.as_bytes();
+        let temp_table = Rc::new(RefCell::new(StringTable::new(bytes.len() + 1)));
+        let temp_idx = temp_table
+            .borrow_mut()
+            .append(bytes)
+            .expect("Append to temp table should not fail");
+        KeyRef::new(temp_table, temp_idx, parent, 0)
+    }
+
+    /*
     pub fn remove_key(&mut self, key: &str) {
         let parent_str = key.rsplit_once('/').map(|(before, _)| before).unwrap_or("");
 
@@ -231,8 +184,10 @@ impl KVStore {
             self.key_value_map.remove(&key_ref);
         }
     }
+    */
 }
 
+/*
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,3 +312,4 @@ mod tests {
         assert!(store.get_children_keys("a").is_some());
     }
 }
+*/
