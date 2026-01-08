@@ -3,6 +3,7 @@ use std::{
     cmp::Ordering,
     hash::{Hash, Hasher},
     rc::Rc,
+    time::SystemTime,
 };
 
 use crate::storage::string_table::StringTable;
@@ -13,6 +14,7 @@ pub struct KeyRef {
     idx: u32,
     parent: u32,
     parent_parent_idx: u32, // Only used for creating parent KeyRef, it is not part of identity
+    expires_at: Option<SystemTime>,
 }
 
 impl KeyRef {
@@ -22,11 +24,13 @@ impl KeyRef {
         parent: u32,
         parent_parent_idx: u32,
     ) -> Self {
+        let expires_at = None;
         Self {
             table,
             idx,
             parent,
             parent_parent_idx,
+            expires_at,
         }
     }
 
@@ -34,8 +38,23 @@ impl KeyRef {
         self.idx
     }
 
+    pub fn get_parent_idx(&self) -> u32 {
+        self.parent
+    }
+
     pub fn get_parent_parent_idx(&self) -> u32 {
         self.parent_parent_idx
+    }
+
+    pub fn is_expired(&self) -> bool {
+        match self.expires_at {
+            None => false,
+            Some(t) => SystemTime::now() >= t,
+        }
+    }
+
+    pub fn set_expiration(&mut self, expires_at: Option<SystemTime>) {
+        self.expires_at = expires_at;
     }
 
     pub fn get_boundary_for_children_search(parent: u32) -> Self {
@@ -44,11 +63,24 @@ impl KeyRef {
             .borrow_mut()
             .append(&[])
             .expect("Append should not fail");
-        KeyRef {
-            table: table,
-            idx: 0,
-            parent: parent,
-            parent_parent_idx: 0, // Irrelevant here
+        // parent_parent_idx is irrelevant here
+        KeyRef::new(table, 0, parent, 0)
+    }
+}
+
+impl Clone for KeyRef {
+    fn clone(&self) -> Self {
+        let table = self.table.clone();
+        let idx = self.idx;
+        let parent = self.parent;
+        let parent_parent_idx = self.parent_parent_idx;
+        let expires_at = None;
+        Self {
+            table,
+            idx,
+            parent,
+            parent_parent_idx,
+            expires_at,
         }
     }
 }

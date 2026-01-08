@@ -1,3 +1,4 @@
+use core::panic;
 use std::{
     ffi::OsStr,
     time::{Duration, SystemTime},
@@ -109,6 +110,17 @@ fn get_child_ino_and_file_type(
         Entry::NoValue => (ino, FileType::Directory),
         Entry::Value(_) => (ino, FileType::RegularFile),
     }
+}
+
+fn parse_ttl(value: &[u8]) -> Result<Option<SystemTime>, i32> {
+    let s = str::from_utf8(value).map_err(|_| libc::EINVAL)?;
+    let ttl_secs: u64 = s.parse().map_err(|_| libc::EINVAL)?;
+
+    if ttl_secs == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(SystemTime::now() + Duration::from_secs(ttl_secs)))
 }
 
 impl Filesystem for KVFS {
@@ -408,7 +420,7 @@ impl Filesystem for KVFS {
             }
         }
 
-        match self.kv_store.remove_key(parent_idx, key_str) {
+        match self.kv_store.remove_key_str(parent_idx, key_str) {
             RemoveResult::NotFound => panic!("Key not found, but it should exist"),
             RemoveResult::HasChildren => reply.error(libc::ENOTEMPTY),
             RemoveResult::Removed => reply.ok(),
@@ -438,7 +450,7 @@ impl Filesystem for KVFS {
             Entry::Value(_) => {}
         }
 
-        match self.kv_store.remove_key(parent_idx, key_str) {
+        match self.kv_store.remove_key_str(parent_idx, key_str) {
             RemoveResult::NotFound => panic!("Key not found, but it should exist"),
             RemoveResult::HasChildren => panic!("Key is a file, but it has children"),
             RemoveResult::Removed => reply.ok(),
@@ -526,5 +538,78 @@ impl Filesystem for KVFS {
 
         let end = std::cmp::min(offset + size as usize, data.len());
         reply.data(&data[offset..end]);
+    }
+
+    fn setxattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        name: &OsStr,
+        value: &[u8],
+        _flags: i32,
+        _position: u32,
+        reply: ReplyEmpty,
+    ) {
+        if name != OsStr::new("user.ttl") {
+            reply.error(libc::ENOTSUP);
+            return;
+        }
+
+        let entry = get_entry_for_ino(ino, &self.kv_store);
+        match entry {
+            Entry::NotFound => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+            Entry::NoValue => {
+                reply.error(libc::EISDIR);
+                return;
+            }
+            Entry::Value(_) => {}
+        }
+
+        let expires_at = match parse_ttl(value) {
+            Ok(v) => v,
+            Err(e) => {
+                reply.error(e);
+                return;
+            }
+        };
+
+        let idx = ino_to_idx(ino);
+        let parent = ino_to_parent_idx(ino);
+
+        if !self.kv_store.set_expiration(parent, idx, expires_at) {
+            panic!("Key not found, but it should exist")
+        }
+        reply.ok();
+    }
+
+    fn removexattr(&mut self, _req: &Request<'_>, ino: u64, name: &OsStr, reply: ReplyEmpty) {
+        if name != OsStr::new("user.ttl") {
+            reply.error(libc::ENOTSUP);
+            return;
+        }
+
+        let entry = get_entry_for_ino(ino, &self.kv_store);
+        match entry {
+            Entry::NotFound => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+            Entry::NoValue => {
+                reply.error(libc::EISDIR);
+                return;
+            }
+            Entry::Value(_) => {}
+        }
+
+        let idx = ino_to_idx(ino);
+        let parent = ino_to_parent_idx(ino);
+
+        if !self.kv_store.set_expiration(parent, idx, None) {
+            panic!("Key not found, but it should exist")
+        }
+        reply.ok();
     }
 }

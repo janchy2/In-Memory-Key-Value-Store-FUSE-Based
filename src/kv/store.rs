@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use std::{cell::RefCell, collections::BTreeMap, rc::Rc, time::SystemTime};
 
 use super::key_ref::KeyRef;
 use crate::storage::string_table::StringTable;
@@ -46,14 +46,15 @@ impl KVStore {
 
     pub fn get_idx_for_key_str(&self, parent: u32, key: &str) -> Option<u32> {
         let temp_key = self.form_key_ref_from_str(parent, key);
-        self.key_value_map
-            .get_key_value(&temp_key)
-            .map(|(k, _)| k.get_idx())
+        if let Some(key_ref) = self.get_key_in_map(&temp_key) {
+            return Some(key_ref.get_idx());
+        }
+        None
     }
 
     pub fn insert_key(&mut self, parent_parent_idx: u32, parent: u32, key: &str) -> Option<u32> {
         let temp_key = self.form_key_ref_from_str(parent, key);
-        if self.key_value_map.contains_key(&temp_key) {
+        if let Some(_) = self.get_key_in_map(&temp_key) {
             return None;
         }
         let bytes = key.as_bytes();
@@ -63,12 +64,20 @@ impl KVStore {
             .append(bytes)
             .expect("Append should not fail");
         let key_ref = KeyRef::new(self.key_table.clone(), idx, parent, parent_parent_idx);
-        self.key_value_map.insert(key_ref, None);
+        let second_key_ref = key_ref.clone();
+        // This means that the key exists already, but is expired
+        if let Some(_) = self.key_value_map.insert(key_ref, None) {
+            self.key_value_map.remove(&temp_key);
+            self.key_value_map.insert(second_key_ref, None);
+        }
         Some(idx)
     }
 
     pub fn insert_value(&mut self, parent: u32, idx: u32, value: &[u8]) -> bool {
         let key = KeyRef::new(self.key_table.clone(), idx, parent, 0);
+        if let None = self.get_key_in_map(&key) {
+            return false;
+        }
         let value_idx = self
             .value_table
             .borrow_mut()
@@ -89,6 +98,9 @@ impl KVStore {
         let mut result = Vec::new();
 
         for (key_ref, _) in self.key_value_map.range(start..end) {
+            if key_ref.is_expired() {
+                continue;
+            }
             let child_idx = key_ref.get_idx();
             if child_idx == idx {
                 // This can happen for root
@@ -114,16 +126,58 @@ impl KVStore {
     pub fn get_parent_parent_idx(&self, parent: u32, idx: u32) -> Option<u32> {
         // parent_parent_idx is irrelevant here, so it is set to 0
         let temp_key = KeyRef::new(self.key_table.clone(), idx, parent, 0);
-        self.key_value_map
-            .get_key_value(&temp_key)
-            .map(|(k, _)| k.get_parent_parent_idx())
+        self.get_key_in_map(&temp_key)
+            .map(|k| k.get_parent_parent_idx())
     }
 
-    pub fn remove_key(&mut self, parent: u32, key: &str) -> RemoveResult {
+    pub fn remove_key_str(&mut self, parent: u32, key: &str) -> RemoveResult {
         let idx = match self.get_idx_for_key_str(parent, key) {
             Some(idx) => idx,
             None => return RemoveResult::NotFound,
         };
+        self.remove_key(parent, idx)
+    }
+
+    pub fn set_expiration(
+        &mut self,
+        parent: u32,
+        idx: u32,
+        expires_at: Option<SystemTime>,
+    ) -> bool {
+        let parent_parent_idx = match self.get_parent_parent_idx(parent, idx) {
+            Some(idx) => idx,
+            None => return false,
+        };
+
+        let mut key_ref = KeyRef::new(self.key_table.clone(), idx, parent, parent_parent_idx);
+        let value = match self.key_value_map.get(&key_ref) {
+            Some(value) => value.clone(),
+            None => panic!("Key not found, but it should exist"),
+        };
+
+        match self.remove_key(parent, idx) {
+            RemoveResult::Removed => {}
+            RemoveResult::HasChildren => panic!("Key not found, but it should exist"),
+            RemoveResult::NotFound => panic!("Key not found, but it should exist"),
+        };
+        key_ref.set_expiration(expires_at);
+        self.key_value_map.insert(key_ref, value);
+        true
+    }
+
+    fn get_key_in_map(&self, key_ref: &KeyRef) -> Option<&KeyRef> {
+        match self.key_value_map.get_key_value(key_ref) {
+            Some((key, _)) => {
+                if key.is_expired() {
+                    return None;
+                }
+                Some(key)
+            }
+            None => None,
+        }
+    }
+
+    fn remove_key(&mut self, parent: u32, idx: u32) -> RemoveResult {
         let children = self.get_children_keys_idx_and_names(idx);
         if children.len() > 0 {
             return RemoveResult::HasChildren;
@@ -132,7 +186,7 @@ impl KVStore {
         let key_ref = KeyRef::new(self.key_table.clone(), idx, parent, 0);
         match self.key_value_map.remove(&key_ref) {
             Some(_) => RemoveResult::Removed,
-            None => panic!("Key not found, but it should exist"),
+            None => return RemoveResult::NotFound,
         }
     }
 
@@ -145,16 +199,23 @@ impl KVStore {
     }
 
     fn get_value_str(&self, key_ref: &KeyRef) -> Entry {
-        match self.key_value_map.get(key_ref).as_deref() {
-            Some(Some(value_idx)) => {
-                let value_table_ref = self.value_table.borrow();
-                let bytes = value_table_ref
-                    .get(*value_idx)
-                    .expect("Get should not fail here");
+        match self.key_value_map.get_key_value(key_ref) {
+            Some((key, value_idx)) => {
+                if key.is_expired() {
+                    return Entry::NotFound;
+                }
+                match value_idx {
+                    Some(value_idx) => {
+                        let value_table_ref = self.value_table.borrow();
+                        let bytes = value_table_ref
+                            .get(*value_idx)
+                            .expect("Get should not fail here");
 
-                Entry::Value(String::from_utf8(bytes.to_vec()).unwrap())
+                        Entry::Value(String::from_utf8(bytes.to_vec()).unwrap())
+                    }
+                    None => Entry::NoValue,
+                }
             }
-            Some(None) => Entry::NoValue,
             None => Entry::NotFound,
         }
     }
@@ -173,6 +234,8 @@ impl KVStore {
 
 #[cfg(test)]
 mod tests {
+    use std::{thread::sleep, time::Duration};
+
     use super::*;
 
     #[test]
@@ -223,8 +286,7 @@ mod tests {
         let mut store = KVStore::new();
 
         let idx = store.insert_key(1, 1, "file").unwrap();
-        let bytes = "hello".as_bytes();
-        assert!(store.insert_value(1, idx, bytes));
+        assert!(store.insert_value(1, idx, b"hello"));
 
         match store.get_value_for_key_idx(1, idx) {
             Entry::Value(v) => assert_eq!(v, "hello"),
@@ -265,7 +327,10 @@ mod tests {
         let a = store.insert_key(1, 1, "a").unwrap();
         let b = store.insert_key(1, a, "b").unwrap();
 
-        assert!(matches!(store.remove_key(a, "b"), RemoveResult::Removed));
+        assert!(matches!(
+            store.remove_key_str(a, "b"),
+            RemoveResult::Removed
+        ));
 
         assert!(matches!(store.get_value_for_key_idx(a, b), Entry::NotFound));
     }
@@ -278,7 +343,7 @@ mod tests {
         store.insert_key(1, a, "b");
 
         assert!(matches!(
-            store.remove_key(1, "a"),
+            store.remove_key_str(1, "a"),
             RemoveResult::HasChildren
         ));
     }
@@ -288,8 +353,108 @@ mod tests {
         let mut store = KVStore::new();
 
         assert!(matches!(
-            store.remove_key(1, "missing"),
+            store.remove_key_str(1, "missing"),
             RemoveResult::NotFound
         ));
+    }
+
+    #[test]
+    fn expired_key_is_not_found_by_lookup() {
+        let mut store = KVStore::new();
+
+        let idx = store.insert_key(1, 1, "temp").unwrap();
+        store.insert_value(1, idx, b"value");
+
+        // Expire in the past
+        let expired_at = SystemTime::now() - Duration::from_secs(1);
+        assert!(store.set_expiration(1, idx, Some(expired_at)));
+
+        assert_eq!(store.get_idx_for_key_str(1, "temp"), None);
+    }
+
+    #[test]
+    fn expired_key_returns_not_found_on_get_value() {
+        let mut store = KVStore::new();
+
+        let idx = store.insert_key(1, 1, "temp").unwrap();
+        store.insert_value(1, idx, b"value");
+
+        let expired_at = SystemTime::now() - Duration::from_secs(1);
+        store.set_expiration(1, idx, Some(expired_at));
+
+        match store.get_value_for_key_idx(1, idx) {
+            Entry::NotFound => {}
+            _ => panic!("Expired key must behave as NotFound"),
+        }
+    }
+
+    #[test]
+    fn expired_key_is_not_listed_as_child() {
+        let mut store = KVStore::new();
+
+        let idx = store.insert_key(1, 1, "child").unwrap();
+
+        let expired_at = SystemTime::now() - Duration::from_secs(1);
+        store.set_expiration(1, idx, Some(expired_at));
+
+        let children = store.get_children_keys_idx_and_names(1);
+        assert!(children.is_empty());
+    }
+
+    #[test]
+    fn ttl_is_preserved_when_value_is_overwritten() {
+        let mut store = KVStore::new();
+
+        let idx = store.insert_key(1, 1, "file").unwrap();
+        store.insert_value(1, idx, b"old");
+
+        let expires_at = SystemTime::now() + Duration::from_secs(60);
+        store.set_expiration(1, idx, Some(expires_at));
+
+        store.insert_value(1, idx, b"new");
+
+        assert_eq!(store.get_idx_for_key_str(1, "file"), Some(idx));
+
+        match store.get_value_for_key_idx(1, idx) {
+            Entry::Value(v) => assert_eq!(v, "new"),
+            _ => panic!("Expected updated value"),
+        }
+    }
+
+    #[test]
+    fn non_expired_key_is_visible() {
+        let mut store = KVStore::new();
+
+        let idx = store.insert_key(1, 1, "alive").unwrap();
+        store.insert_value(1, idx, b"ok");
+
+        let expires_at = SystemTime::now() + Duration::from_secs(60);
+        store.set_expiration(1, idx, Some(expires_at));
+
+        assert_eq!(store.get_idx_for_key_str(1, "alive"), Some(idx));
+
+        match store.get_value_for_key_idx(1, idx) {
+            Entry::Value(v) => assert_eq!(v, "ok"),
+            _ => panic!("Expected value for non-expired key"),
+        }
+    }
+
+    #[test]
+    fn can_reinsert_key_with_same_name_after_expiration() {
+        let mut store = KVStore::new();
+        let idx1 = store
+            .insert_key(1, 1, "temp")
+            .expect("initial insert must succeed");
+
+        let expires_at = SystemTime::now() + Duration::from_millis(50);
+        assert!(store.set_expiration(1, idx1, Some(expires_at)));
+
+        sleep(Duration::from_millis(80));
+        assert_eq!(store.get_idx_for_key_str(1, "temp"), None);
+
+        let idx2 = store
+            .insert_key(1, 1, "temp")
+            .expect("Reinserting expired key should succeed");
+        assert_eq!(store.get_idx_for_key_str(1, "temp"), Some(idx2));
     }
 }
