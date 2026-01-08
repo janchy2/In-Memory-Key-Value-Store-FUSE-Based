@@ -16,7 +16,6 @@ impl StringTable {
         // Capacity + 1 bytes is allocated because root is at index 1
         let capacity = capacity + 1;
         Self {
-            // Capacity + 1 bytes is allocated because root is at index 1
             data: vec![0; capacity].into_boxed_slice(),
             // Start from 1 because root key has to be at index 1
             next: 1,

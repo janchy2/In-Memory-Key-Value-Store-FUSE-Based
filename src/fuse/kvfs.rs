@@ -4,8 +4,8 @@ use std::{
 };
 
 use fuser::{
-    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyDirectory, ReplyEmpty, ReplyEntry,
-    ReplyWrite, Request, TimeOrNow, mount2,
+    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty,
+    ReplyEntry, ReplyWrite, Request, TimeOrNow, mount2,
 };
 
 use crate::{
@@ -66,6 +66,8 @@ fn create_file_attr(ino: u64, kv_store: &KVStore) -> Result<FileAttr, Error> {
         }
     }
 
+    // This filesystem does not track mutable metadata such as permissions, ownership, or timestamps,
+    // so those types of values are mocked
     Ok(FileAttr {
         ino,
         size: size,
@@ -258,6 +260,8 @@ impl Filesystem for KVFS {
         };
 
         let ino = form_ino(parent_idx, idx);
+        // This filesystem does not track mutable metadata such as permissions, ownership, or timestamps,
+        // so those types of values are mocked.
         let attr = FileAttr {
             ino,
             size: 0,
@@ -320,11 +324,13 @@ impl Filesystem for KVFS {
             None => return reply.error(libc::EEXIST),
         };
 
-        if !self.kv_store.insert_value(parent_idx, idx, "") {
+        if !self.kv_store.insert_value(parent_idx, idx, &[]) {
             panic!("Setting empty string value for existing key failed")
         }
 
         let ino = form_ino(parent_idx, idx);
+        // This filesystem does not track mutable metadata such as permissions, ownership, or timestamps,
+        // so those types of values are mocked.
         let attr = FileAttr {
             ino,
             size: 0,
@@ -363,8 +369,11 @@ impl Filesystem for KVFS {
         _flags: Option<u32>,
         reply: ReplyAttr,
     ) {
-        // TODO: Implement this, currently it just responds to support touch
-        println!("getattr inode {ino}");
+        // Attribute updates are ignored, as this filesystem does not track mutable
+        // metadata such as permissions, ownership, or timestamps. The function
+        // simply returns the current attributes to support basic filesystem
+        // operations like `touch`.
+        println!("setattr inode {ino}");
         let attr = match create_file_attr(ino, &self.kv_store) {
             Ok(ok_attr) => ok_attr,
             Err(_) => {
@@ -440,14 +449,82 @@ impl Filesystem for KVFS {
         &mut self,
         _req: &Request<'_>,
         ino: u64,
-        fh: u64,
+        _fh: u64,
         offset: i64,
         data: &[u8],
-        write_flags: u32,
-        flags: i32,
-        lock_owner: Option<u64>,
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        
+        println!("write inode {ino}");
+        // The filesystem enforces atomic value replacement
+        if offset != 0 {
+            reply.error(libc::EINVAL);
+            return;
+        }
+
+        let entry = get_entry_for_ino(ino, &self.kv_store);
+        match entry {
+            Entry::NotFound => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+            Entry::NoValue => {
+                reply.error(libc::EISDIR);
+                return;
+            }
+            Entry::Value(_) => {}
+        }
+
+        let parent = ino_to_parent_idx(ino);
+        let idx = ino_to_idx(ino);
+        if !self.kv_store.insert_value(parent, idx, data) {
+            panic!("Key not found, but it should exist");
+        }
+        reply.written(data.len() as u32);
+    }
+
+    fn read(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        size: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: ReplyData,
+    ) {
+        println!("read inode {ino}");
+
+        let entry = get_entry_for_ino(ino, &self.kv_store);
+        let value = match entry {
+            Entry::NotFound => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+            Entry::NoValue => {
+                reply.error(libc::EISDIR);
+                return;
+            }
+            Entry::Value(value) => value,
+        };
+
+        if offset < 0 {
+            reply.error(libc::EINVAL);
+            return;
+        }
+
+        let offset = offset as usize;
+        let data = value.as_bytes();
+
+        if offset >= data.len() {
+            reply.data(&[]);
+            return;
+        }
+
+        let end = std::cmp::min(offset + size as usize, data.len());
+        reply.data(&data[offset..end]);
     }
 }

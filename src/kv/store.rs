@@ -67,12 +67,12 @@ impl KVStore {
         Some(idx)
     }
 
-    pub fn insert_value(&mut self, parent: u32, idx: u32, value: &str) -> bool {
+    pub fn insert_value(&mut self, parent: u32, idx: u32, value: &[u8]) -> bool {
         let key = KeyRef::new(self.key_table.clone(), idx, parent, 0);
         let value_idx = self
             .value_table
             .borrow_mut()
-            .append(value.as_bytes())
+            .append(value)
             .expect("Append should not fail");
         if let Some(v) = self.key_value_map.get_mut(&key) {
             *v = Some(value_idx);
@@ -101,6 +101,7 @@ impl KVStore {
     }
 
     pub fn get_value_for_key_idx(&self, parent: u32, idx: u32) -> Entry {
+        // parent_parent_idx is irrelevant here, so it is set to 0
         let temp_key = KeyRef::new(self.key_table.clone(), idx, parent, 0);
         self.get_value_str(&temp_key)
     }
@@ -111,6 +112,7 @@ impl KVStore {
     }
 
     pub fn get_parent_parent_idx(&self, parent: u32, idx: u32) -> Option<u32> {
+        // parent_parent_idx is irrelevant here, so it is set to 0
         let temp_key = KeyRef::new(self.key_table.clone(), idx, parent, 0);
         self.key_value_map
             .get_key_value(&temp_key)
@@ -126,6 +128,7 @@ impl KVStore {
         if children.len() > 0 {
             return RemoveResult::HasChildren;
         }
+        // parent_parent_idx is irrelevant here, so it is set to 0
         let key_ref = KeyRef::new(self.key_table.clone(), idx, parent, 0);
         match self.key_value_map.remove(&key_ref) {
             Some(_) => RemoveResult::Removed,
@@ -163,6 +166,7 @@ impl KVStore {
             .borrow_mut()
             .append(bytes)
             .expect("Append to temp table should not fail");
+        // parent_parent_idx is irrelevant here, so it is set to 0
         KeyRef::new(temp_table, temp_idx, parent, 0)
     }
 }
@@ -219,7 +223,8 @@ mod tests {
         let mut store = KVStore::new();
 
         let idx = store.insert_key(1, 1, "file").unwrap();
-        assert!(store.insert_value(1, idx, "hello"));
+        let bytes = "hello".as_bytes();
+        assert!(store.insert_value(1, idx, bytes));
 
         match store.get_value_for_key_idx(1, idx) {
             Entry::Value(v) => assert_eq!(v, "hello"),
@@ -260,15 +265,9 @@ mod tests {
         let a = store.insert_key(1, 1, "a").unwrap();
         let b = store.insert_key(1, a, "b").unwrap();
 
-        assert!(matches!(
-            store.remove_key(a, "b"),
-            RemoveResult::Removed
-        ));
+        assert!(matches!(store.remove_key(a, "b"), RemoveResult::Removed));
 
-        assert!(matches!(
-            store.get_value_for_key_idx(a, b),
-            Entry::NotFound
-        ));
+        assert!(matches!(store.get_value_for_key_idx(a, b), Entry::NotFound));
     }
 
     #[test]

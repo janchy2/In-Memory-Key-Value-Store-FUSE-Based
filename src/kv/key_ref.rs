@@ -48,7 +48,7 @@ impl KeyRef {
             table: table,
             idx: 0,
             parent: parent,
-            parent_parent_idx: 0, // Not relevant here
+            parent_parent_idx: 0, // Irrelevant here
         }
     }
 }
