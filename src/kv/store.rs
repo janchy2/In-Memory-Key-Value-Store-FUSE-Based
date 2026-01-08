@@ -13,6 +13,12 @@ pub enum Entry {
     Value(String),
 }
 
+pub enum RemoveResult {
+    NotFound,
+    HasChildren,
+    Removed,
+}
+
 pub struct KVStore {
     key_table: Rc<RefCell<StringTable>>,
     value_table: Rc<RefCell<StringTable>>,
@@ -94,8 +100,13 @@ impl KVStore {
         result
     }
 
-    pub fn get_value_for_key(&self, parent: u32, idx: u32) -> Entry {
+    pub fn get_value_for_key_idx(&self, parent: u32, idx: u32) -> Entry {
         let temp_key = KeyRef::new(self.key_table.clone(), idx, parent, 0);
+        self.get_value_str(&temp_key)
+    }
+
+    pub fn get_value_for_key_str(&self, parent: u32, key: &str) -> Entry {
+        let temp_key = self.form_key_ref_from_str(parent, key);
         self.get_value_str(&temp_key)
     }
 
@@ -104,6 +115,22 @@ impl KVStore {
         self.key_value_map
             .get_key_value(&temp_key)
             .map(|(k, _)| k.get_parent_parent_idx())
+    }
+
+    pub fn remove_key(&mut self, parent: u32, key: &str) -> RemoveResult {
+        let idx = match self.get_idx_for_key_str(parent, key) {
+            Some(idx) => idx,
+            None => return RemoveResult::NotFound,
+        };
+        let children = self.get_children_keys_idx_and_names(idx);
+        if children.len() > 0 {
+            return RemoveResult::HasChildren;
+        }
+        let key_ref = KeyRef::new(self.key_table.clone(), idx, parent, 0);
+        match self.key_value_map.remove(&key_ref) {
+            Some(_) => RemoveResult::Removed,
+            None => panic!("Key not found, but it should exist"),
+        }
     }
 
     fn get_key_str(&self, key_ref: &KeyRef) -> String {
@@ -138,178 +165,132 @@ impl KVStore {
             .expect("Append to temp table should not fail");
         KeyRef::new(temp_table, temp_idx, parent, 0)
     }
-
-    /*
-    pub fn remove_key(&mut self, key: &str) {
-        let parent_str = key.rsplit_once('/').map(|(before, _)| before).unwrap_or("");
-
-        let parent_idx;
-        if parent_str == "" {
-            parent_idx = None
-        } else {
-            let (key_idx, _) = match self.lookup_key_value_for_key(parent_str) {
-                Some(key_value) => key_value,
-                None => return,
-            };
-            parent_idx = Some(key_idx);
-        }
-
-        let (key_idx, _) = match self.lookup_key_value_for_key(key) {
-            Some(key_value) => key_value,
-            None => return,
-        };
-
-        let root_key_ref = KeyRef::new(self.key_table.clone(), key_idx, parent_idx);
-
-        let mut queue = VecDeque::new();
-        let mut to_remove = Vec::new();
-
-        queue.push_back(root_key_ref);
-
-        while let Some(current) = queue.pop_front() {
-            let current_idx = current.get_idx();
-            let start = KeyRef::get_boundary_for_children_search(current_idx);
-            let end = KeyRef::get_boundary_for_children_search(current_idx + 1);
-
-            for (key_ref, _) in self.key_value_map.range(start..end) {
-                queue.push_back(KeyRef::new(
-                    self.key_table.clone(),
-                    key_ref.get_idx(),
-                    Some(current_idx),
-                ));
-            }
-            to_remove.push(current);
-        }
-        for key_ref in to_remove {
-            self.key_value_map.remove(&key_ref);
-        }
-    }
-    */
 }
 
-/*
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn insert_key_simple() {
-        let mut store = KVStore::new();
+    fn new_store_contains_root_directory() {
+        let store = KVStore::new();
 
-        assert!(store.insert_key("a"));
-        assert!(store.insert_key("a/b"));
-        assert!(store.insert_key("a/b/c"));
+        let root_children = store.get_children_keys_idx_and_names(1);
+        assert!(root_children.is_empty());
 
-        assert!(!store.insert_key("a/b"));
+        match store.get_value_for_key_idx(1, 1) {
+            Entry::NoValue => {}
+            _ => panic!("Root must be a directory"),
+        }
     }
 
     #[test]
-    fn insert_key_value_and_get_value() {
+    fn insert_key_and_lookup_by_string() {
         let mut store = KVStore::new();
 
-        assert!(store.insert_key_value("a/b/c", "value1"));
-        assert_eq!(store.get_value("a/b/c"), Some("value1".to_string()));
+        let idx = store.insert_key(1, 1, "a").expect("Insert should succeed");
 
-        assert_eq!(store.get_value("a/b"), None);
+        assert_eq!(store.get_idx_for_key_str(1, "a"), Some(idx));
     }
 
     #[test]
-    fn cannot_insert_below_value_key() {
+    fn duplicate_key_under_same_parent_is_rejected() {
         let mut store = KVStore::new();
 
-        assert!(store.insert_key_value("a", "root"));
-
-        assert!(!store.insert_key("a/b"));
-        assert!(!store.insert_key_value("a/b", "child"));
+        assert!(store.insert_key(1, 1, "a").is_some());
+        assert!(store.insert_key(1, 1, "a").is_none());
     }
 
     #[test]
-    fn get_children_keys_simple() {
+    fn same_key_name_under_different_parents_is_allowed() {
         let mut store = KVStore::new();
 
-        store.insert_key("a/b");
-        store.insert_key("a/c");
-        store.insert_key("a/d");
+        let a = store.insert_key(1, 1, "a").unwrap();
+        let b = store.insert_key(1, 1, "b").unwrap();
 
-        let children = store.get_children_keys("a").unwrap();
+        let a1 = store.insert_key(1, a, "x").unwrap();
+        let b1 = store.insert_key(1, b, "x").unwrap();
 
-        assert_eq!(
-            children,
-            vec!["b".to_string(), "c".to_string(), "d".to_string()]
-        );
+        assert_ne!(a1, b1);
     }
 
     #[test]
-    fn get_children_keys_nested() {
+    fn insert_value_and_retrieve_it() {
         let mut store = KVStore::new();
 
-        store.insert_key("a/b/c");
-        store.insert_key("a/b/d");
-        store.insert_key("a/b/e");
+        let idx = store.insert_key(1, 1, "file").unwrap();
+        assert!(store.insert_value(1, idx, "hello"));
 
-        let children = store.get_children_keys("a/b").unwrap();
+        match store.get_value_for_key_idx(1, idx) {
+            Entry::Value(v) => assert_eq!(v, "hello"),
+            _ => panic!("Expected value"),
+        }
+    }
 
-        assert_eq!(
-            children,
-            vec!["c".to_string(), "d".to_string(), "e".to_string()]
-        );
+    #[test]
+    fn get_children_of_key() {
+        let mut store = KVStore::new();
+
+        let idx = store.insert_key(1, 1, "key").unwrap();
+        store.insert_key(0, idx, "a");
+        store.insert_key(0, idx, "b");
+        store.insert_key(0, idx, "c");
+
+        let children = store.get_children_keys_idx_and_names(idx);
+        let names: Vec<_> = children.into_iter().map(|(_, n)| n).collect();
+
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn parent_parent_idx_is_correct() {
+        let mut store = KVStore::new();
+
+        let a = store.insert_key(1, 1, "a").unwrap();
+        let b = store.insert_key(1, a, "b").unwrap();
+
+        let ppi = store.get_parent_parent_idx(a, b).unwrap();
+        assert_eq!(ppi, 1);
     }
 
     #[test]
     fn remove_leaf_key() {
         let mut store = KVStore::new();
 
-        store.insert_key("a/b/c");
-        store.insert_key("a/b/d");
+        let a = store.insert_key(1, 1, "a").unwrap();
+        let b = store.insert_key(1, a, "b").unwrap();
 
-        store.remove_key("a/b/c");
+        assert!(matches!(
+            store.remove_key(a, "b"),
+            RemoveResult::Removed
+        ));
 
-        assert_eq!(store.get_value("a/b/c"), None);
-        assert!(
-            store
-                .get_children_keys("a/b")
-                .unwrap()
-                .contains(&"d".to_string())
-        );
+        assert!(matches!(
+            store.get_value_for_key_idx(a, b),
+            Entry::NotFound
+        ));
     }
 
     #[test]
-    fn remove_subtree() {
+    fn remove_key_with_children_fails() {
         let mut store = KVStore::new();
 
-        store.insert_key_value("a/b/c", "v1");
-        store.insert_key_value("a/b/d", "v2");
-        store.insert_key("a/b/e/f");
+        let a = store.insert_key(1, 1, "a").unwrap();
+        store.insert_key(1, a, "b");
 
-        store.remove_key("a/b");
-
-        assert_eq!(store.get_children_keys("a"), Some(vec![]));
-        assert_eq!(store.get_value("a/b/c"), None);
-        assert_eq!(store.get_value("a/b/d"), None);
+        assert!(matches!(
+            store.remove_key(1, "a"),
+            RemoveResult::HasChildren
+        ));
     }
 
     #[test]
-    fn remove_root_level_key() {
+    fn remove_nonexistent_key() {
         let mut store = KVStore::new();
 
-        store.insert_key("a/b");
-        store.insert_key("c/d");
-
-        store.remove_key("a");
-
-        assert_eq!(store.get_children_keys("a"), None);
-        assert!(store.get_children_keys("c").is_some());
-    }
-
-    #[test]
-    fn remove_nonexistent_key_does_nothing() {
-        let mut store = KVStore::new();
-
-        store.insert_key("a/b");
-
-        store.remove_key("x/y");
-
-        assert!(store.get_children_keys("a").is_some());
+        assert!(matches!(
+            store.remove_key(1, "missing"),
+            RemoveResult::NotFound
+        ));
     }
 }
-*/

@@ -4,13 +4,13 @@ use std::{
 };
 
 use fuser::{
-    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyDirectory, ReplyEntry, Request,
-    mount2,
+    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyDirectory, ReplyEmpty, ReplyEntry,
+    ReplyWrite, Request, TimeOrNow, mount2,
 };
 
 use crate::{
     fuse::inode::{form_ino, ino_to_idx, ino_to_parent_idx},
-    kv::store::{Entry, KVStore},
+    kv::store::{Entry, KVStore, RemoveResult},
 };
 
 const TTL: Duration = Duration::from_secs(1);
@@ -88,7 +88,7 @@ fn create_file_attr(ino: u64, kv_store: &KVStore) -> Result<FileAttr, Error> {
 fn get_entry_for_ino(ino: u64, kv_store: &KVStore) -> Entry {
     let parent = ino_to_parent_idx(ino);
     let idx = ino_to_idx(ino);
-    kv_store.get_value_for_key(parent, idx)
+    kv_store.get_value_for_key_idx(parent, idx)
 }
 
 fn osstr_to_name(name: &OsStr) -> Result<&str, libc::c_int> {
@@ -101,7 +101,7 @@ fn get_child_ino_and_file_type(
     kv_store: &KVStore,
 ) -> (u64, FileType) {
     let ino = form_ino(parent_idx, child_idx);
-    let entry = kv_store.get_value_for_key(parent_idx, child_idx);
+    let entry = kv_store.get_value_for_key_idx(parent_idx, child_idx);
     match entry {
         Entry::NotFound => panic!("Child node key not found. This should never happen"),
         Entry::NoValue => (ino, FileType::Directory),
@@ -283,9 +283,9 @@ impl Filesystem for KVFS {
         _req: &Request<'_>,
         parent: u64,
         name: &OsStr,
-        mode: u32,
-        umask: u32,
-        rdev: u32,
+        _mode: u32,
+        _umask: u32,
+        _rdev: u32,
         reply: ReplyEntry,
     ) {
         println!("mknod parent {parent}");
@@ -343,5 +343,111 @@ impl Filesystem for KVFS {
             blksize: 512,
         };
         reply.entry(&TTL, &attr, 0);
+    }
+
+    fn setattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        _size: Option<u64>,
+        _atime: Option<TimeOrNow>,
+        _mtime: Option<TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _fh: Option<u64>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        // TODO: Implement this, currently it just responds to support touch
+        println!("getattr inode {ino}");
+        let attr = match create_file_attr(ino, &self.kv_store) {
+            Ok(ok_attr) => ok_attr,
+            Err(_) => {
+                println!("No entry");
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+        reply.attr(&TTL, &attr);
+    }
+
+    fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        println!("rmdir parent {parent}");
+        let key_str = match osstr_to_name(name) {
+            Ok(s) => s,
+            Err(e) => {
+                reply.error(e);
+                return;
+            }
+        };
+        let parent_idx = ino_to_idx(parent);
+        let entry = self.kv_store.get_value_for_key_str(parent_idx, key_str);
+        match entry {
+            Entry::NotFound => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+            Entry::NoValue => {}
+            Entry::Value(_) => {
+                reply.error(libc::ENOTDIR);
+                return;
+            }
+        }
+
+        match self.kv_store.remove_key(parent_idx, key_str) {
+            RemoveResult::NotFound => panic!("Key not found, but it should exist"),
+            RemoveResult::HasChildren => reply.error(libc::ENOTEMPTY),
+            RemoveResult::Removed => reply.ok(),
+        }
+    }
+
+    fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        println!("unlink parent {parent}");
+        let key_str = match osstr_to_name(name) {
+            Ok(s) => s,
+            Err(e) => {
+                reply.error(e);
+                return;
+            }
+        };
+        let parent_idx = ino_to_idx(parent);
+        let entry = self.kv_store.get_value_for_key_str(parent_idx, key_str);
+        match entry {
+            Entry::NotFound => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+            Entry::NoValue => {
+                reply.error(libc::EISDIR);
+                return;
+            }
+            Entry::Value(_) => {}
+        }
+
+        match self.kv_store.remove_key(parent_idx, key_str) {
+            RemoveResult::NotFound => panic!("Key not found, but it should exist"),
+            RemoveResult::HasChildren => panic!("Key is a file, but it has children"),
+            RemoveResult::Removed => reply.ok(),
+        }
+    }
+
+    fn write(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        data: &[u8],
+        write_flags: u32,
+        flags: i32,
+        lock_owner: Option<u64>,
+        reply: ReplyWrite,
+    ) {
+        
     }
 }
