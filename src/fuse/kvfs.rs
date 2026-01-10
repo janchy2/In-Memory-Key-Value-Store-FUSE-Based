@@ -1,6 +1,7 @@
 use core::panic;
 use std::{
     ffi::OsStr,
+    sync::{Arc, RwLock},
     time::{Duration, SystemTime},
 };
 
@@ -27,12 +28,12 @@ pub enum Error {
 }
 
 pub struct KVFS {
-    kv_store: KVStore,
+    kv_store: Arc<RwLock<KVStore>>,
 }
 
 impl KVFS {
     fn new() -> Self {
-        let kv_store = KVStore::new();
+        let kv_store = Arc::new(RwLock::new(KVStore::new()));
         Self { kv_store }
     }
 
@@ -53,12 +54,16 @@ impl KVFS {
 impl Filesystem for KVFS {
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
         println!("getattr inode {ino}");
-        let attr = match create_file_attr(ino, &self.kv_store) {
-            Ok(ok_attr) => ok_attr,
-            Err(_) => {
-                println!("No entry");
-                reply.error(libc::ENOENT);
-                return;
+        let guard = self.kv_store.read().unwrap();
+
+        let attr = {
+            match create_file_attr(ino, &guard) {
+                Ok(ok_attr) => ok_attr,
+                Err(_) => {
+                    println!("No entry");
+                    reply.error(libc::ENOENT);
+                    return;
+                }
             }
         };
         reply.attr(&TTL, &attr);
@@ -75,7 +80,10 @@ impl Filesystem for KVFS {
         };
 
         let parent_idx = ino_to_idx(parent);
-        let key_idx = match self.kv_store.get_idx_for_key_str(parent_idx, key_str) {
+
+        let guard = self.kv_store.read().unwrap();
+
+        let key_idx = match guard.get_idx_for_key_str(parent_idx, key_str) {
             Some(idx) => idx,
             None => {
                 reply.error(libc::ENOENT);
@@ -84,7 +92,7 @@ impl Filesystem for KVFS {
         };
 
         let ino = form_ino(parent_idx, key_idx);
-        let attr = match create_file_attr(ino, &self.kv_store) {
+        let attr = match create_file_attr(ino, &guard) {
             Ok(ok_attr) => ok_attr,
             Err(_) => {
                 reply.error(libc::ENOENT);
@@ -103,7 +111,9 @@ impl Filesystem for KVFS {
         mut reply: ReplyDirectory,
     ) {
         println!("readdir inode {ino}");
-        let entry = get_entry_for_ino(ino, &self.kv_store);
+        let guard = self.kv_store.read().unwrap();
+
+        let entry = get_entry_for_ino(ino, &guard);
         match entry {
             Entry::NotFound => {
                 reply.error(libc::ENOENT);
@@ -127,10 +137,7 @@ impl Filesystem for KVFS {
         }
         current_offset += 1;
         if current_offset > offset {
-            let parent_parent_idx = self
-                .kv_store
-                .get_parent_parent_idx(parent_idx, idx)
-                .unwrap();
+            let parent_parent_idx = guard.get_parent_parent_idx(parent_idx, idx).unwrap();
             let parent_ino = form_ino(parent_parent_idx, parent_idx);
             if reply.add(parent_ino, current_offset, FileType::Directory, "..") {
                 return;
@@ -138,7 +145,7 @@ impl Filesystem for KVFS {
         }
         current_offset += 1;
 
-        let children = self.kv_store.get_children_keys_idx_and_names(idx);
+        let children = guard.get_children_keys_idx_and_names(idx);
 
         for (child_idx, child_name) in children {
             if current_offset <= offset {
@@ -146,7 +153,7 @@ impl Filesystem for KVFS {
                 continue;
             }
 
-            let (ino, kind) = get_child_ino_and_file_type(idx, child_idx, &self.kv_store);
+            let (ino, kind) = get_child_ino_and_file_type(idx, child_idx, &guard);
 
             if reply.add(ino, current_offset, kind, child_name) {
                 return;
@@ -167,7 +174,17 @@ impl Filesystem for KVFS {
         reply: ReplyEntry,
     ) {
         println!("mkdir parent {parent}");
-        let entry = get_entry_for_ino(parent, &self.kv_store);
+        let key_str = match osstr_to_name(name) {
+            Ok(s) => s,
+            Err(e) => {
+                reply.error(e);
+                return;
+            }
+        };
+
+        let mut guard = self.kv_store.write().unwrap();
+
+        let entry = get_entry_for_ino(parent, &guard);
         match entry {
             Entry::NotFound => {
                 reply.error(libc::ENOENT);
@@ -180,20 +197,9 @@ impl Filesystem for KVFS {
             }
         }
 
-        let key_str = match osstr_to_name(name) {
-            Ok(s) => s,
-            Err(e) => {
-                reply.error(e);
-                return;
-            }
-        };
-
         let parent_idx = ino_to_idx(parent);
         let parent_parent_idx = ino_to_parent_idx(parent);
-        let idx = match self
-            .kv_store
-            .insert_key(parent_parent_idx, parent_idx, key_str)
-        {
+        let idx = match guard.insert_key(parent_parent_idx, parent_idx, key_str) {
             Some(idx) => idx,
             None => return reply.error(libc::EEXIST),
         };
@@ -232,7 +238,18 @@ impl Filesystem for KVFS {
         reply: ReplyEntry,
     ) {
         println!("mknod parent {parent}");
-        let entry = get_entry_for_ino(parent, &self.kv_store);
+
+        let key_str = match osstr_to_name(name) {
+            Ok(s) => s,
+            Err(e) => {
+                reply.error(e);
+                return;
+            }
+        };
+
+        let mut guard = self.kv_store.write().unwrap();
+
+        let entry = get_entry_for_ino(parent, &guard);
         match entry {
             Entry::NotFound => {
                 reply.error(libc::ENOENT);
@@ -245,25 +262,14 @@ impl Filesystem for KVFS {
             }
         }
 
-        let key_str = match osstr_to_name(name) {
-            Ok(s) => s,
-            Err(e) => {
-                reply.error(e);
-                return;
-            }
-        };
-
         let parent_idx = ino_to_idx(parent);
         let parent_parent_idx = ino_to_parent_idx(parent);
-        let idx = match self
-            .kv_store
-            .insert_key(parent_parent_idx, parent_idx, key_str)
-        {
+        let idx = match guard.insert_key(parent_parent_idx, parent_idx, key_str) {
             Some(idx) => idx,
             None => return reply.error(libc::EEXIST),
         };
 
-        if !self.kv_store.insert_value(parent_idx, idx, &[]) {
+        if !guard.insert_value(parent_idx, idx, &[]) {
             panic!("Setting empty string value for existing key failed")
         }
 
@@ -313,7 +319,9 @@ impl Filesystem for KVFS {
         // simply returns the current attributes to support basic filesystem
         // operations like `touch`.
         println!("setattr inode {ino}");
-        let attr = match create_file_attr(ino, &self.kv_store) {
+        let guard = self.kv_store.read().unwrap();
+
+        let attr = match create_file_attr(ino, &guard) {
             Ok(ok_attr) => ok_attr,
             Err(_) => {
                 println!("No entry");
@@ -333,8 +341,11 @@ impl Filesystem for KVFS {
                 return;
             }
         };
+
+        let mut guard = self.kv_store.write().unwrap();
+
         let parent_idx = ino_to_idx(parent);
-        let entry = self.kv_store.get_value_for_key_str(parent_idx, key_str);
+        let entry = guard.get_value_for_key_str(parent_idx, key_str);
         match entry {
             Entry::NotFound => {
                 reply.error(libc::ENOENT);
@@ -347,7 +358,7 @@ impl Filesystem for KVFS {
             }
         }
 
-        match self.kv_store.remove_key_str(parent_idx, key_str) {
+        match guard.remove_key_str(parent_idx, key_str) {
             RemoveResult::NotFound => panic!("Key not found, but it should exist"),
             RemoveResult::HasChildren => reply.error(libc::ENOTEMPTY),
             RemoveResult::Removed => reply.ok(),
@@ -363,8 +374,11 @@ impl Filesystem for KVFS {
                 return;
             }
         };
+
+        let mut guard = self.kv_store.write().unwrap();
+
         let parent_idx = ino_to_idx(parent);
-        let entry = self.kv_store.get_value_for_key_str(parent_idx, key_str);
+        let entry = guard.get_value_for_key_str(parent_idx, key_str);
         match entry {
             Entry::NotFound => {
                 reply.error(libc::ENOENT);
@@ -377,7 +391,7 @@ impl Filesystem for KVFS {
             Entry::Value(_) => {}
         }
 
-        match self.kv_store.remove_key_str(parent_idx, key_str) {
+        match guard.remove_key_str(parent_idx, key_str) {
             RemoveResult::NotFound => panic!("Key not found, but it should exist"),
             RemoveResult::HasChildren => panic!("Key is a file, but it has children"),
             RemoveResult::Removed => reply.ok(),
@@ -403,7 +417,9 @@ impl Filesystem for KVFS {
             return;
         }
 
-        let entry = get_entry_for_ino(ino, &self.kv_store);
+        let mut guard = self.kv_store.write().unwrap();
+
+        let entry = get_entry_for_ino(ino, &guard);
         match entry {
             Entry::NotFound => {
                 reply.error(libc::ENOENT);
@@ -418,7 +434,7 @@ impl Filesystem for KVFS {
 
         let parent = ino_to_parent_idx(ino);
         let idx = ino_to_idx(ino);
-        if !self.kv_store.insert_value(parent, idx, data) {
+        if !guard.insert_value(parent, idx, data) {
             panic!("Key not found, but it should exist");
         }
         reply.written(data.len() as u32);
@@ -437,7 +453,9 @@ impl Filesystem for KVFS {
     ) {
         println!("read inode {ino}");
 
-        let entry = get_entry_for_ino(ino, &self.kv_store);
+        let guard = self.kv_store.read().unwrap();
+
+        let entry = get_entry_for_ino(ino, &guard);
         let value = match entry {
             Entry::NotFound => {
                 reply.error(libc::ENOENT);
@@ -482,7 +500,9 @@ impl Filesystem for KVFS {
             return;
         }
 
-        let entry = get_entry_for_ino(ino, &self.kv_store);
+        let mut guard = self.kv_store.write().unwrap();
+
+        let entry = get_entry_for_ino(ino, &guard);
         match entry {
             Entry::NotFound => {
                 reply.error(libc::ENOENT);
@@ -506,37 +526,13 @@ impl Filesystem for KVFS {
         let idx = ino_to_idx(ino);
         let parent = ino_to_parent_idx(ino);
 
-        if !self.kv_store.set_expiration(parent, idx, expires_at) {
+        if !guard.set_expiration(parent, idx, expires_at) {
             panic!("Key not found, but it should exist")
         }
         reply.ok();
     }
 
     fn removexattr(&mut self, _req: &Request<'_>, ino: u64, name: &OsStr, reply: ReplyEmpty) {
-        if name != OsStr::new("user.ttl") {
-            reply.error(libc::ENOTSUP);
-            return;
-        }
-
-        let entry = get_entry_for_ino(ino, &self.kv_store);
-        match entry {
-            Entry::NotFound => {
-                reply.error(libc::ENOENT);
-                return;
-            }
-            Entry::NoValue => {
-                reply.error(libc::EISDIR);
-                return;
-            }
-            Entry::Value(_) => {}
-        }
-
-        let idx = ino_to_idx(ino);
-        let parent = ino_to_parent_idx(ino);
-
-        if !self.kv_store.set_expiration(parent, idx, None) {
-            panic!("Key not found, but it should exist")
-        }
-        reply.ok();
+        self.setxattr(_req, ino, name, b"0", 0, 0, reply);
     }
 }
