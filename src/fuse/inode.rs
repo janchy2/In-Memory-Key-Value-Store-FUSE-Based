@@ -8,12 +8,7 @@ pub fn ino_to_idx(ino: u64) -> u32 {
 
 #[inline]
 pub fn ino_to_parent_idx(ino: u64) -> u32 {
-    let idx = ((ino >> IDX_BITS) & MASK) as u32;
-    if idx == 0 {
-        // For root, parent should also be root
-        return 1;
-    }
-    idx
+    ((ino >> IDX_BITS) & MASK) as u32
 }
 
 #[inline]

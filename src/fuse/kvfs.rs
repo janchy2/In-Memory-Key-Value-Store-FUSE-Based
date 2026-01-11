@@ -22,10 +22,7 @@ use crate::{
 };
 
 const TTL: Duration = Duration::from_secs(1);
-
-pub enum Error {
-    KeyNotFound,
-}
+const ROOT_INDEX: u32 = 1;
 
 pub struct KVFS {
     kv_store: Arc<RwLock<KVStore>>,
@@ -34,6 +31,16 @@ pub struct KVFS {
 impl KVFS {
     fn new() -> Self {
         let kv_store = Arc::new(RwLock::new(KVStore::new()));
+        // The filesystem requires the root key to have a fixed index (ROOT_INDEX) to
+        // support deterministic inode to key mapping. To achieve this, we first insert
+        // a dummy key at index 0, and then insert the root key at index ROOT_INDEX (1)
+        let mut guard = kv_store.write().unwrap();
+        let reserved_empty = guard.register_reserved_key_value(0, 0, "", None);
+        let reserved_root = guard.register_reserved_key_value(ROOT_INDEX, ROOT_INDEX, "", None);
+        if !(reserved_empty && reserved_root) {
+            panic!("Registering reserved keys failed");
+        }
+        drop(guard);
         Self { kv_store }
     }
 
@@ -42,8 +49,8 @@ impl KVFS {
 
         let options = vec![
             MountOption::FSName("kvfs".to_string()),
-            MountOption::DefaultPermissions,
             MountOption::AutoUnmount,
+            MountOption::AllowRoot,
         ];
 
         println!("Mounting filesystem to {mountpoint}");
@@ -67,6 +74,32 @@ impl Filesystem for KVFS {
             }
         };
         reply.attr(&TTL, &attr);
+    }
+
+    fn setattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        _size: Option<u64>,
+        _atime: Option<TimeOrNow>,
+        _mtime: Option<TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _fh: Option<u64>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        // Attribute updates are ignored, as this filesystem does not track mutable
+        // metadata such as permissions, ownership, or timestamps. The function
+        // simply returns the current attributes to support basic filesystem
+        // operations like `touch`.
+        println!("setattr inode {ino}");
+        self.getattr(_req, ino, _fh, reply);
     }
 
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
@@ -294,42 +327,6 @@ impl Filesystem for KVFS {
             blksize: 512,
         };
         reply.entry(&TTL, &attr, 0);
-    }
-
-    fn setattr(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        _mode: Option<u32>,
-        _uid: Option<u32>,
-        _gid: Option<u32>,
-        _size: Option<u64>,
-        _atime: Option<TimeOrNow>,
-        _mtime: Option<TimeOrNow>,
-        _ctime: Option<SystemTime>,
-        _fh: Option<u64>,
-        _crtime: Option<SystemTime>,
-        _chgtime: Option<SystemTime>,
-        _bkuptime: Option<SystemTime>,
-        _flags: Option<u32>,
-        reply: ReplyAttr,
-    ) {
-        // Attribute updates are ignored, as this filesystem does not track mutable
-        // metadata such as permissions, ownership, or timestamps. The function
-        // simply returns the current attributes to support basic filesystem
-        // operations like `touch`.
-        println!("setattr inode {ino}");
-        let guard = self.kv_store.read().unwrap();
-
-        let attr = match create_file_attr(ino, &guard) {
-            Ok(ok_attr) => ok_attr,
-            Err(_) => {
-                println!("No entry");
-                reply.error(libc::ENOENT);
-                return;
-            }
-        };
-        reply.attr(&TTL, &attr);
     }
 
     fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {

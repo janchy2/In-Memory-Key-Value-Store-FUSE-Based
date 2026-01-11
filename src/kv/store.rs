@@ -1,7 +1,9 @@
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc, time::SystemTime};
 
+use crate::kv::string_table::AppendResult;
+
 use super::key_ref::KeyRef;
-use crate::storage::string_table::StringTable;
+use super::string_table::StringTable;
 
 const KEY_TABLE_SIZE: usize = 1024;
 const VALUE_TABLE_SIZE: usize = 1024;
@@ -23,25 +25,49 @@ pub struct KVStore {
     key_table: Rc<RefCell<StringTable>>,
     value_table: Rc<RefCell<StringTable>>,
     key_value_map: BTreeMap<KeyRef, Option<u32>>,
+    // Reserved keys and their values are reinserted after key_value_map is cleared on eviction.
+    // They are not guaranteed to have the same index when reinserted.
+    reserved_keys: Vec<KeyRef>,
 }
 
 impl KVStore {
     pub fn new() -> Self {
         let key_table = Rc::new(RefCell::new(StringTable::new(KEY_TABLE_SIZE)));
         let value_table = Rc::new(RefCell::new(StringTable::new(VALUE_TABLE_SIZE)));
-        let mut key_value_map = BTreeMap::new();
+        let key_value_map = BTreeMap::new();
+        let reserved_keys: Vec<KeyRef> = Vec::new();
 
-        let root_idx = key_table
-            .borrow_mut()
-            .append(&[])
-            .expect("Append should not fail here");
-        let root_key = KeyRef::new(key_table.clone(), root_idx, root_idx, root_idx);
-        key_value_map.insert(root_key, None);
         KVStore {
             key_table,
             value_table,
             key_value_map,
+            reserved_keys,
         }
+    }
+
+    pub fn register_reserved_key_value(
+        &mut self,
+        parent_parent_idx: u32,
+        parent: u32,
+        key: &str,
+        value: Option<&str>,
+    ) -> bool {
+        let idx = match self.insert_key(parent_parent_idx, parent, key) {
+            Some(idx) => idx,
+            None => {
+                return false;
+            }
+        };
+
+        if let Some(value) = value {
+            if !self.insert_value(parent, idx, value.as_bytes()) {
+                return false;
+            }
+        }
+
+        let key_ref = KeyRef::new(self.key_table.clone(), idx, parent, parent_parent_idx);
+        self.reserved_keys.push(key_ref);
+        true
     }
 
     pub fn get_idx_for_key_str(&self, parent: u32, key: &str) -> Option<u32> {
@@ -58,11 +84,14 @@ impl KVStore {
             return None;
         }
         let bytes = key.as_bytes();
-        let idx = self
-            .key_table
-            .borrow_mut()
-            .append(bytes)
-            .expect("Append should not fail");
+        let append_result = self.key_table.borrow_mut().append(bytes);
+        let idx = match append_result {
+            AppendResult::Ok(idx) => idx,
+            AppendResult::CapacityExceeded => {
+                self.evict_all();
+                Self::expect_append_ok(self.key_table.borrow_mut().append(bytes))
+            }
+        };
         let key_ref = KeyRef::new(self.key_table.clone(), idx, parent, parent_parent_idx);
         let second_key_ref = key_ref.clone();
         // This means that the key exists already, but is expired
@@ -78,11 +107,14 @@ impl KVStore {
         if let None = self.get_key_in_map(&key) {
             return false;
         }
-        let value_idx = self
-            .value_table
-            .borrow_mut()
-            .append(value)
-            .expect("Append should not fail");
+        let append_result = self.value_table.borrow_mut().append(value);
+        let value_idx = match append_result {
+            AppendResult::Ok(idx) => idx,
+            AppendResult::CapacityExceeded => {
+                self.evict_all();
+                Self::expect_append_ok(self.key_table.borrow_mut().append(value))
+            }
+        };
         if let Some(v) = self.key_value_map.get_mut(&key) {
             *v = Some(value_idx);
             true
@@ -165,6 +197,57 @@ impl KVStore {
         true
     }
 
+    fn evict_all(&mut self) {
+        let to_reinsert = self.get_keys_and_values_to_reinsert();
+        self.key_value_map.clear();
+        self.reserved_keys.clear();
+        self.key_table.borrow_mut().clear();
+        self.value_table.borrow_mut().clear();
+        self.reinsert_reserved_keys_and_values(to_reinsert);
+    }
+
+    fn get_keys_and_values_to_reinsert(&mut self) -> Vec<(KeyRef, String, Option<String>)> {
+        let mut result = Vec::new();
+        for key_ref in &self.reserved_keys {
+            let key = self.get_key_str(&key_ref);
+            let value = match self.get_value_str(&key_ref) {
+                Entry::NoValue => None,
+                Entry::NotFound => panic!("Reserved key not found"),
+                Entry::Value(value) => Some(value),
+            };
+
+            result.push((key_ref.clone(), key, value));
+        }
+
+        result
+    }
+
+    fn reinsert_reserved_keys_and_values(
+        &mut self,
+        to_reinsert: Vec<(KeyRef, String, Option<String>)>,
+    ) {
+        for (key_ref, key, value) in to_reinsert {
+            let value_ref = value.as_deref();
+            if !self.register_reserved_key_value(
+                key_ref.get_parent_parent_idx(),
+                key_ref.get_parent_idx(),
+                &key,
+                value_ref,
+            ) {
+                panic!("Reinserting reserved keys and values failed");
+            }
+        }
+    }
+
+    fn expect_append_ok(res: AppendResult) -> u32 {
+        match res {
+            AppendResult::Ok(idx) => idx,
+            AppendResult::CapacityExceeded => {
+                panic!("Capacity exceeded when it should not")
+            }
+        }
+    }
+
     fn get_key_in_map(&self, key_ref: &KeyRef) -> Option<&KeyRef> {
         match self.key_value_map.get_key_value(key_ref) {
             Some((key, _)) => {
@@ -223,10 +306,7 @@ impl KVStore {
     fn form_key_ref_from_str(&self, parent: u32, key: &str) -> KeyRef {
         let bytes = key.as_bytes();
         let temp_table = Rc::new(RefCell::new(StringTable::new(bytes.len() + 1)));
-        let temp_idx = temp_table
-            .borrow_mut()
-            .append(bytes)
-            .expect("Append to temp table should not fail");
+        let temp_idx = Self::expect_append_ok(temp_table.borrow_mut().append(bytes));
         // parent_parent_idx is irrelevant here, so it is set to 0
         KeyRef::new(temp_table, temp_idx, parent, 0)
     }
@@ -237,19 +317,6 @@ mod tests {
     use std::{thread::sleep, time::Duration};
 
     use super::*;
-
-    #[test]
-    fn new_store_contains_root_directory() {
-        let store = KVStore::new();
-
-        let root_children = store.get_children_keys_idx_and_names(1);
-        assert!(root_children.is_empty());
-
-        match store.get_value_for_key_idx(1, 1) {
-            Entry::NoValue => {}
-            _ => panic!("Root must be a directory"),
-        }
-    }
 
     #[test]
     fn insert_key_and_lookup_by_string() {
@@ -456,5 +523,28 @@ mod tests {
             .insert_key(1, 1, "temp")
             .expect("Reinserting expired key should succeed");
         assert_eq!(store.get_idx_for_key_str(1, "temp"), Some(idx2));
+    }
+
+    #[test]
+    fn reserved_keys_survive_eviction() {
+        let mut store = KVStore::new();
+
+        assert!(store.register_reserved_key_value(0, 0, "rkey1", Some("val1")));
+        assert!(store.register_reserved_key_value(0, 0, "rkey2", None));
+
+        store.evict_all();
+
+        let idx1 = store.get_idx_for_key_str(0, "rkey1").unwrap();
+        let idx2 = store.get_idx_for_key_str(0, "rkey2").unwrap();
+
+        match store.get_value_for_key_idx(0, idx1) {
+            Entry::Value(v) => assert_eq!(v, "val1"),
+            _ => panic!("Expected value for rkey1"),
+        }
+
+        match store.get_value_for_key_idx(0, idx2) {
+            Entry::NoValue => {}
+            _ => panic!("Expected no value for rkey2"),
+        }
     }
 }

@@ -1,18 +1,18 @@
 use std::{
     ffi::OsStr,
-    sync::{Arc, RwLock, RwLockReadGuard},
     time::{Duration, SystemTime},
 };
 
 use fuser::{FileAttr, FileType};
 
 use crate::{
-    fuse::{
-        inode::{form_ino, ino_to_idx, ino_to_parent_idx},
-        kvfs::Error,
-    },
+    fuse::inode::{form_ino, ino_to_idx, ino_to_parent_idx},
     kv::store::{Entry, KVStore},
 };
+
+pub enum Error {
+    KeyNotFound,
+}
 
 pub fn create_file_attr(ino: u64, kv_store: &KVStore) -> Result<FileAttr, Error> {
     let mut size = 0;
