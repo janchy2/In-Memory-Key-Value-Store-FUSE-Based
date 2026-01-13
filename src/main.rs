@@ -1,10 +1,28 @@
-use crate::fuse::kvfs::KVFS;
-
+mod config;
 pub mod fuse;
 pub mod kv;
 
-fn main() {
-    let mountpoint = std::env::args().nth(1).expect("Usage: kvfs <MOUNTPOINT>");
+use clap::Parser;
 
-    KVFS::mount(&mountpoint);
+use crate::{
+    config::{Args, KvConfig},
+    fuse::kvfs::KVFS,
+};
+
+fn main() {
+    let args = Args::parse();
+
+    let kv_config = KvConfig::try_from(args)
+        .map_err(|e| {
+            eprintln!("Invalid config: {:?}", e);
+            e
+        })
+        .unwrap();
+
+    KVFS::mount(&kv_config)
+        .map_err(|e| {
+            eprintln!("Failed to mount filesystem: {e}");
+            e
+        })
+        .unwrap();
 }

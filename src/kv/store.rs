@@ -5,10 +5,6 @@ use crate::kv::string_table::AppendResult;
 use super::key_ref::KeyRef;
 use super::string_table::StringTable;
 
-const KEY_TABLE_SIZE: usize = 1024;
-const VALUE_TABLE_SIZE: usize = 1024;
-// TODO: Parametrize this
-
 pub enum Entry {
     NotFound,
     NoValue,
@@ -24,16 +20,16 @@ pub enum RemoveResult {
 pub struct KVStore {
     key_table: Rc<RefCell<StringTable>>,
     value_table: Rc<RefCell<StringTable>>,
-    key_value_map: BTreeMap<KeyRef, Option<u32>>,
+    key_value_map: BTreeMap<KeyRef, Option<usize>>,
     // Reserved keys and their values are reinserted after key_value_map is cleared on eviction.
     // They are not guaranteed to have the same index when reinserted.
     reserved_keys: Vec<KeyRef>,
 }
 
 impl KVStore {
-    pub fn new() -> Self {
-        let key_table = Rc::new(RefCell::new(StringTable::new(KEY_TABLE_SIZE)));
-        let value_table = Rc::new(RefCell::new(StringTable::new(VALUE_TABLE_SIZE)));
+    pub fn new(key_capacity: usize, value_capacity: usize, max_capacity: usize) -> Self {
+        let key_table = Rc::new(RefCell::new(StringTable::new(key_capacity, max_capacity)));
+        let value_table = Rc::new(RefCell::new(StringTable::new(value_capacity, max_capacity)));
         let key_value_map = BTreeMap::new();
         let reserved_keys: Vec<KeyRef> = Vec::new();
 
@@ -47,8 +43,8 @@ impl KVStore {
 
     pub fn register_reserved_key_value(
         &mut self,
-        parent_parent_idx: u32,
-        parent: u32,
+        parent_parent_idx: usize,
+        parent: usize,
         key: &str,
         value: Option<&str>,
     ) -> bool {
@@ -70,7 +66,7 @@ impl KVStore {
         true
     }
 
-    pub fn get_idx_for_key_str(&self, parent: u32, key: &str) -> Option<u32> {
+    pub fn get_idx_for_key_str(&self, parent: usize, key: &str) -> Option<usize> {
         let temp_key = self.form_key_ref_from_str(parent, key);
         if let Some(key_ref) = self.get_key_in_map(&temp_key) {
             return Some(key_ref.get_idx());
@@ -78,7 +74,12 @@ impl KVStore {
         None
     }
 
-    pub fn insert_key(&mut self, parent_parent_idx: u32, parent: u32, key: &str) -> Option<u32> {
+    pub fn insert_key(
+        &mut self,
+        parent_parent_idx: usize,
+        parent: usize,
+        key: &str,
+    ) -> Option<usize> {
         let temp_key = self.form_key_ref_from_str(parent, key);
         if let Some(_) = self.get_key_in_map(&temp_key) {
             return None;
@@ -102,7 +103,7 @@ impl KVStore {
         Some(idx)
     }
 
-    pub fn insert_value(&mut self, parent: u32, idx: u32, value: &[u8]) -> bool {
+    pub fn insert_value(&mut self, parent: usize, idx: usize, value: &[u8]) -> bool {
         let key = KeyRef::new(self.key_table.clone(), idx, parent, 0);
         if let None = self.get_key_in_map(&key) {
             return false;
@@ -123,7 +124,7 @@ impl KVStore {
         }
     }
 
-    pub fn get_children_keys_idx_and_names(&self, idx: u32) -> Vec<(u32, String)> {
+    pub fn get_children_keys_idx_and_names(&self, idx: usize) -> Vec<(usize, String)> {
         let start = KeyRef::get_boundary_for_children_search(idx);
         let end = KeyRef::get_boundary_for_children_search(idx + 1);
 
@@ -144,25 +145,25 @@ impl KVStore {
         result
     }
 
-    pub fn get_value_for_key_idx(&self, parent: u32, idx: u32) -> Entry {
+    pub fn get_value_for_key_idx(&self, parent: usize, idx: usize) -> Entry {
         // parent_parent_idx is irrelevant here, so it is set to 0
         let temp_key = KeyRef::new(self.key_table.clone(), idx, parent, 0);
         self.get_value_str(&temp_key)
     }
 
-    pub fn get_value_for_key_str(&self, parent: u32, key: &str) -> Entry {
+    pub fn get_value_for_key_str(&self, parent: usize, key: &str) -> Entry {
         let temp_key = self.form_key_ref_from_str(parent, key);
         self.get_value_str(&temp_key)
     }
 
-    pub fn get_parent_parent_idx(&self, parent: u32, idx: u32) -> Option<u32> {
+    pub fn get_parent_parent_idx(&self, parent: usize, idx: usize) -> Option<usize> {
         // parent_parent_idx is irrelevant here, so it is set to 0
         let temp_key = KeyRef::new(self.key_table.clone(), idx, parent, 0);
         self.get_key_in_map(&temp_key)
             .map(|k| k.get_parent_parent_idx())
     }
 
-    pub fn remove_key_str(&mut self, parent: u32, key: &str) -> RemoveResult {
+    pub fn remove_key_str(&mut self, parent: usize, key: &str) -> RemoveResult {
         let idx = match self.get_idx_for_key_str(parent, key) {
             Some(idx) => idx,
             None => return RemoveResult::NotFound,
@@ -172,8 +173,8 @@ impl KVStore {
 
     pub fn set_expiration(
         &mut self,
-        parent: u32,
-        idx: u32,
+        parent: usize,
+        idx: usize,
         expires_at: Option<SystemTime>,
     ) -> bool {
         let parent_parent_idx = match self.get_parent_parent_idx(parent, idx) {
@@ -239,7 +240,7 @@ impl KVStore {
         }
     }
 
-    fn expect_append_ok(res: AppendResult) -> u32 {
+    fn expect_append_ok(res: AppendResult) -> usize {
         match res {
             AppendResult::Ok(idx) => idx,
             AppendResult::CapacityExceeded => {
@@ -260,7 +261,7 @@ impl KVStore {
         }
     }
 
-    fn remove_key(&mut self, parent: u32, idx: u32) -> RemoveResult {
+    fn remove_key(&mut self, parent: usize, idx: usize) -> RemoveResult {
         let children = self.get_children_keys_idx_and_names(idx);
         if children.len() > 0 {
             return RemoveResult::HasChildren;
@@ -303,9 +304,10 @@ impl KVStore {
         }
     }
 
-    fn form_key_ref_from_str(&self, parent: u32, key: &str) -> KeyRef {
+    fn form_key_ref_from_str(&self, parent: usize, key: &str) -> KeyRef {
         let bytes = key.as_bytes();
-        let temp_table = Rc::new(RefCell::new(StringTable::new(bytes.len() + 1)));
+        let capacity = bytes.len() + 1;
+        let temp_table = Rc::new(RefCell::new(StringTable::new(capacity, capacity)));
         let temp_idx = Self::expect_append_ok(temp_table.borrow_mut().append(bytes));
         // parent_parent_idx is irrelevant here, so it is set to 0
         KeyRef::new(temp_table, temp_idx, parent, 0)
@@ -320,7 +322,7 @@ mod tests {
 
     #[test]
     fn insert_key_and_lookup_by_string() {
-        let mut store = KVStore::new();
+        let mut store = KVStore::new(10, 10, 10);
 
         let idx = store.insert_key(1, 1, "a").expect("Insert should succeed");
 
@@ -329,7 +331,7 @@ mod tests {
 
     #[test]
     fn duplicate_key_under_same_parent_is_rejected() {
-        let mut store = KVStore::new();
+        let mut store = KVStore::new(10, 10, 10);
 
         assert!(store.insert_key(1, 1, "a").is_some());
         assert!(store.insert_key(1, 1, "a").is_none());
@@ -337,7 +339,7 @@ mod tests {
 
     #[test]
     fn same_key_name_under_different_parents_is_allowed() {
-        let mut store = KVStore::new();
+        let mut store = KVStore::new(10, 10, 10);
 
         let a = store.insert_key(1, 1, "a").unwrap();
         let b = store.insert_key(1, 1, "b").unwrap();
@@ -350,7 +352,7 @@ mod tests {
 
     #[test]
     fn insert_value_and_retrieve_it() {
-        let mut store = KVStore::new();
+        let mut store = KVStore::new(10, 10, 10);
 
         let idx = store.insert_key(1, 1, "file").unwrap();
         assert!(store.insert_value(1, idx, b"hello"));
@@ -363,7 +365,7 @@ mod tests {
 
     #[test]
     fn get_children_of_key() {
-        let mut store = KVStore::new();
+        let mut store = KVStore::new(10, 10, 10);
 
         let idx = store.insert_key(1, 1, "key").unwrap();
         store.insert_key(0, idx, "a");
@@ -378,7 +380,7 @@ mod tests {
 
     #[test]
     fn parent_parent_idx_is_correct() {
-        let mut store = KVStore::new();
+        let mut store = KVStore::new(10, 10, 10);
 
         let a = store.insert_key(1, 1, "a").unwrap();
         let b = store.insert_key(1, a, "b").unwrap();
@@ -389,7 +391,7 @@ mod tests {
 
     #[test]
     fn remove_leaf_key() {
-        let mut store = KVStore::new();
+        let mut store = KVStore::new(10, 10, 10);
 
         let a = store.insert_key(1, 1, "a").unwrap();
         let b = store.insert_key(1, a, "b").unwrap();
@@ -404,7 +406,7 @@ mod tests {
 
     #[test]
     fn remove_key_with_children_fails() {
-        let mut store = KVStore::new();
+        let mut store = KVStore::new(10, 10, 10);
 
         let a = store.insert_key(1, 1, "a").unwrap();
         store.insert_key(1, a, "b");
@@ -417,7 +419,7 @@ mod tests {
 
     #[test]
     fn remove_nonexistent_key() {
-        let mut store = KVStore::new();
+        let mut store = KVStore::new(10, 10, 10);
 
         assert!(matches!(
             store.remove_key_str(1, "missing"),
@@ -427,12 +429,11 @@ mod tests {
 
     #[test]
     fn expired_key_is_not_found_by_lookup() {
-        let mut store = KVStore::new();
+        let mut store = KVStore::new(10, 10, 10);
 
         let idx = store.insert_key(1, 1, "temp").unwrap();
         store.insert_value(1, idx, b"value");
 
-        // Expire in the past
         let expired_at = SystemTime::now() - Duration::from_secs(1);
         assert!(store.set_expiration(1, idx, Some(expired_at)));
 
@@ -441,7 +442,7 @@ mod tests {
 
     #[test]
     fn expired_key_returns_not_found_on_get_value() {
-        let mut store = KVStore::new();
+        let mut store = KVStore::new(10, 10, 10);
 
         let idx = store.insert_key(1, 1, "temp").unwrap();
         store.insert_value(1, idx, b"value");
@@ -457,7 +458,7 @@ mod tests {
 
     #[test]
     fn expired_key_is_not_listed_as_child() {
-        let mut store = KVStore::new();
+        let mut store = KVStore::new(10, 10, 10);
 
         let idx = store.insert_key(1, 1, "child").unwrap();
 
@@ -470,12 +471,12 @@ mod tests {
 
     #[test]
     fn ttl_is_preserved_when_value_is_overwritten() {
-        let mut store = KVStore::new();
+        let mut store = KVStore::new(10, 10, 10);
 
         let idx = store.insert_key(1, 1, "file").unwrap();
         store.insert_value(1, idx, b"old");
 
-        let expires_at = SystemTime::now() + Duration::from_secs(60);
+        let expires_at = SystemTime::now() + Duration::from_secs(3);
         store.set_expiration(1, idx, Some(expires_at));
 
         store.insert_value(1, idx, b"new");
@@ -486,11 +487,15 @@ mod tests {
             Entry::Value(v) => assert_eq!(v, "new"),
             _ => panic!("Expected updated value"),
         }
+
+        sleep(Duration::from_secs(3));
+
+        assert_eq!(store.get_idx_for_key_str(1, "file"), None);
     }
 
     #[test]
     fn non_expired_key_is_visible() {
-        let mut store = KVStore::new();
+        let mut store = KVStore::new(10, 10, 10);
 
         let idx = store.insert_key(1, 1, "alive").unwrap();
         store.insert_value(1, idx, b"ok");
@@ -508,7 +513,7 @@ mod tests {
 
     #[test]
     fn can_reinsert_key_with_same_name_after_expiration() {
-        let mut store = KVStore::new();
+        let mut store = KVStore::new(10, 10, 10);
         let idx1 = store
             .insert_key(1, 1, "temp")
             .expect("initial insert must succeed");
@@ -527,7 +532,7 @@ mod tests {
 
     #[test]
     fn reserved_keys_survive_eviction() {
-        let mut store = KVStore::new();
+        let mut store = KVStore::new(10, 10, 20);
 
         assert!(store.register_reserved_key_value(0, 0, "rkey1", Some("val1")));
         assert!(store.register_reserved_key_value(0, 0, "rkey2", None));

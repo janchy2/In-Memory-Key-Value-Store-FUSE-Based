@@ -11,6 +11,7 @@ use fuser::{
 };
 
 use crate::{
+    config::KvConfig,
     fuse::{
         helpers::{
             create_file_attr, get_child_ino_and_file_type, get_entry_for_ino, osstr_to_name,
@@ -22,15 +23,19 @@ use crate::{
 };
 
 const TTL: Duration = Duration::from_secs(1);
-const ROOT_INDEX: u32 = 1;
+const ROOT_INDEX: usize = 1;
 
 pub struct KVFS {
     kv_store: Arc<RwLock<KVStore>>,
 }
 
 impl KVFS {
-    fn new() -> Self {
-        let kv_store = Arc::new(RwLock::new(KVStore::new()));
+    fn new(config: &KvConfig) -> Self {
+        let kv_store = Arc::new(RwLock::new(KVStore::new(
+            config.key_capacity,
+            config.value_capacity,
+            config.max_capacity,
+        )));
         // The filesystem requires the root key to have a fixed index (ROOT_INDEX) to
         // support deterministic inode to key mapping. To achieve this, we first insert
         // a dummy key at index 0, and then insert the root key at index ROOT_INDEX (1)
@@ -44,23 +49,21 @@ impl KVFS {
         Self { kv_store }
     }
 
-    pub fn mount(mountpoint: &str) {
-        let fs = KVFS::new();
+    pub fn mount(config: &KvConfig) -> Result<(), std::io::Error> {
+        let fs = KVFS::new(config);
 
-        let options = vec![
+        let options = [
             MountOption::FSName("kvfs".to_string()),
             MountOption::AutoUnmount,
             MountOption::AllowRoot,
         ];
 
-        println!("Mounting filesystem to {mountpoint}");
-        mount2(fs, mountpoint, &options).expect("Failed to mount filesystem");
+        mount2(fs, &config.mountpoint, &options)
     }
 }
 
 impl Filesystem for KVFS {
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
-        println!("getattr inode {ino}");
         let guard = self.kv_store.read().unwrap();
 
         let attr = {
@@ -98,12 +101,10 @@ impl Filesystem for KVFS {
         // metadata such as permissions, ownership, or timestamps. The function
         // simply returns the current attributes to support basic filesystem
         // operations like `touch`.
-        println!("setattr inode {ino}");
         self.getattr(_req, ino, _fh, reply);
     }
 
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        println!("lookup parent {parent}");
         let key_str = match osstr_to_name(name) {
             Ok(s) => s,
             Err(e) => {
@@ -143,7 +144,6 @@ impl Filesystem for KVFS {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        println!("readdir inode {ino}");
         let guard = self.kv_store.read().unwrap();
 
         let entry = get_entry_for_ino(ino, &guard);
@@ -206,7 +206,6 @@ impl Filesystem for KVFS {
         _umask: u32,
         reply: ReplyEntry,
     ) {
-        println!("mkdir parent {parent}");
         let key_str = match osstr_to_name(name) {
             Ok(s) => s,
             Err(e) => {
@@ -270,8 +269,6 @@ impl Filesystem for KVFS {
         _rdev: u32,
         reply: ReplyEntry,
     ) {
-        println!("mknod parent {parent}");
-
         let key_str = match osstr_to_name(name) {
             Ok(s) => s,
             Err(e) => {
@@ -330,7 +327,6 @@ impl Filesystem for KVFS {
     }
 
     fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-        println!("rmdir parent {parent}");
         let key_str = match osstr_to_name(name) {
             Ok(s) => s,
             Err(e) => {
@@ -363,7 +359,6 @@ impl Filesystem for KVFS {
     }
 
     fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-        println!("unlink parent {parent}");
         let key_str = match osstr_to_name(name) {
             Ok(s) => s,
             Err(e) => {
@@ -407,7 +402,6 @@ impl Filesystem for KVFS {
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        println!("write inode {ino}");
         // The filesystem enforces atomic value replacement
         if offset != 0 {
             reply.error(libc::EINVAL);
@@ -448,8 +442,6 @@ impl Filesystem for KVFS {
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        println!("read inode {ino}");
-
         let guard = self.kv_store.read().unwrap();
 
         let entry = get_entry_for_ino(ino, &guard);

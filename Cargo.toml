@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 fuser = "0.16"
 libc = "0.2.179"
+clap = { version = "4.5.54", features = ["derive"] }

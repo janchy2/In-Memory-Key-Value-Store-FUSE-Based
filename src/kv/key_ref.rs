@@ -11,18 +11,18 @@ use super::string_table::StringTable;
 #[derive(Debug)]
 pub struct KeyRef {
     table: Rc<RefCell<StringTable>>,
-    idx: u32,
-    parent: u32,
-    parent_parent_idx: u32, // Only used for creating parent KeyRef, it is not part of identity
+    idx: usize,
+    parent: usize,
+    parent_parent_idx: usize, // Only used for creating parent KeyRef, it is not part of identity
     expires_at: Option<SystemTime>,
 }
 
 impl KeyRef {
     pub fn new(
         table: Rc<RefCell<StringTable>>,
-        idx: u32,
-        parent: u32,
-        parent_parent_idx: u32,
+        idx: usize,
+        parent: usize,
+        parent_parent_idx: usize,
     ) -> Self {
         let expires_at = None;
         Self {
@@ -34,15 +34,15 @@ impl KeyRef {
         }
     }
 
-    pub fn get_idx(&self) -> u32 {
+    pub fn get_idx(&self) -> usize {
         self.idx
     }
 
-    pub fn get_parent_idx(&self) -> u32 {
+    pub fn get_parent_idx(&self) -> usize {
         self.parent
     }
 
-    pub fn get_parent_parent_idx(&self) -> u32 {
+    pub fn get_parent_parent_idx(&self) -> usize {
         self.parent_parent_idx
     }
 
@@ -57,8 +57,8 @@ impl KeyRef {
         self.expires_at = expires_at;
     }
 
-    pub fn get_boundary_for_children_search(parent: u32) -> Self {
-        let table = Rc::new(RefCell::new(StringTable::new(1)));
+    pub fn get_boundary_for_children_search(parent: usize) -> Self {
+        let table = Rc::new(RefCell::new(StringTable::new(1, 1)));
         table.borrow_mut().append(&[]);
         // parent_parent_idx is irrelevant here
         KeyRef::new(table, 0, parent, 0)
@@ -141,7 +141,7 @@ mod tests {
 
     use super::*;
 
-    fn unwrap_idx(res: AppendResult) -> u32 {
+    fn unwrap_idx(res: AppendResult) -> usize {
         match res {
             AppendResult::Ok(idx) => idx,
             AppendResult::CapacityExceeded => panic!("Capacity exceeded"),
@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn string_refs_with_different_indices_equal_same_parent() {
-        let table = Rc::new(RefCell::new(StringTable::new(5)));
+        let table = Rc::new(RefCell::new(StringTable::new(5, 5)));
 
         let a1 = unwrap_idx(table.borrow_mut().append(b"a"));
         let a2 = unwrap_idx(table.borrow_mut().append(b"a"));
@@ -163,8 +163,8 @@ mod tests {
 
     #[test]
     fn string_refs_from_different_tables_equal_same_parent() {
-        let t1 = Rc::new(RefCell::new(StringTable::new(10)));
-        let t2 = Rc::new(RefCell::new(StringTable::new(10)));
+        let t1 = Rc::new(RefCell::new(StringTable::new(10, 10)));
+        let t2 = Rc::new(RefCell::new(StringTable::new(10, 10)));
 
         let a = unwrap_idx(t1.borrow_mut().append(b"hello"));
         let b = unwrap_idx(t2.borrow_mut().append(b"hello"));
@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn same_string_different_parent_not_equal() {
-        let table = Rc::new(RefCell::new(StringTable::new(10)));
+        let table = Rc::new(RefCell::new(StringTable::new(10, 10)));
 
         let a1 = unwrap_idx(table.borrow_mut().append(b"a"));
         let a2 = unwrap_idx(table.borrow_mut().append(b"a"));
@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn string_refs_different_strings_not_equal() {
-        let table = Rc::new(RefCell::new(StringTable::new(10)));
+        let table = Rc::new(RefCell::new(StringTable::new(10, 10)));
 
         let a = unwrap_idx(table.borrow_mut().append(b"a"));
         let b = unwrap_idx(table.borrow_mut().append(b"b"));
@@ -203,7 +203,7 @@ mod tests {
 
     #[test]
     fn equal_string_and_parent_have_same_hash() {
-        let table = Rc::new(RefCell::new(StringTable::new(10)));
+        let table = Rc::new(RefCell::new(StringTable::new(10, 10)));
 
         let a1 = unwrap_idx(table.borrow_mut().append(b"abc"));
         let a2 = unwrap_idx(table.borrow_mut().append(b"abc"));
@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn different_parent_changes_hash() {
-        let table = Rc::new(RefCell::new(StringTable::new(10)));
+        let table = Rc::new(RefCell::new(StringTable::new(10, 10)));
 
         let a = unwrap_idx(table.borrow_mut().append(b"abc"));
 
@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn same_parent_compares_by_string() {
-        let table = Rc::new(RefCell::new(StringTable::new(5)));
+        let table = Rc::new(RefCell::new(StringTable::new(5, 5)));
 
         let a = unwrap_idx(table.borrow_mut().append(b"a"));
         let b = unwrap_idx(table.borrow_mut().append(b"b"));
@@ -252,8 +252,21 @@ mod tests {
     }
 
     #[test]
+    fn same_string_compares_by_parent() {
+        let table = Rc::new(RefCell::new(StringTable::new(5, 5)));
+
+        let a = unwrap_idx(table.borrow_mut().append(b"a"));
+        let b = unwrap_idx(table.borrow_mut().append(b"a"));
+
+        let r1 = KeyRef::new(Rc::clone(&table), a, 2, 0);
+        let r2 = KeyRef::new(Rc::clone(&table), b, 1, 0);
+
+        assert!(r1 > r2);
+    }
+
+    #[test]
     fn equal_strings_and_parent_compare_equal() {
-        let table = Rc::new(RefCell::new(StringTable::new(5)));
+        let table = Rc::new(RefCell::new(StringTable::new(5, 5)));
 
         let a1 = unwrap_idx(table.borrow_mut().append(b"a"));
         let a2 = unwrap_idx(table.borrow_mut().append(b"a"));
@@ -266,7 +279,7 @@ mod tests {
 
     #[test]
     fn different_parent_parent_idx_does_not_affect_equality() {
-        let table = Rc::new(RefCell::new(StringTable::new(10)));
+        let table = Rc::new(RefCell::new(StringTable::new(10, 10)));
 
         let a1 = unwrap_idx(table.borrow_mut().append(b"a"));
         let a2 = unwrap_idx(table.borrow_mut().append(b"a"));
@@ -279,7 +292,7 @@ mod tests {
 
     #[test]
     fn parent_parent_idx_does_not_affect_ordering() {
-        let table = Rc::new(RefCell::new(StringTable::new(10)));
+        let table = Rc::new(RefCell::new(StringTable::new(10, 10)));
 
         let a = unwrap_idx(table.borrow_mut().append(b"a"));
         let b = unwrap_idx(table.borrow_mut().append(b"b"));
@@ -292,7 +305,7 @@ mod tests {
 
     #[test]
     fn parent_parent_idx_does_not_affect_hash() {
-        let table = Rc::new(RefCell::new(StringTable::new(10)));
+        let table = Rc::new(RefCell::new(StringTable::new(10, 10)));
 
         let a1 = unwrap_idx(table.borrow_mut().append(b"x"));
         let a2 = unwrap_idx(table.borrow_mut().append(b"x"));

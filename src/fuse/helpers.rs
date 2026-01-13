@@ -69,8 +69,8 @@ pub fn osstr_to_name(name: &OsStr) -> Result<&str, libc::c_int> {
 }
 
 pub fn get_child_ino_and_file_type(
-    parent_idx: u32,
-    child_idx: u32,
+    parent_idx: usize,
+    child_idx: usize,
     kv_store: &KVStore,
 ) -> (u64, FileType) {
     let ino = form_ino(parent_idx, child_idx);

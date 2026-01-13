@@ -1,19 +1,19 @@
-const MAX_CAPACITY: usize = u32::MAX as usize;
-
 pub enum AppendResult {
-    Ok(u32),
+    Ok(usize),
     CapacityExceeded,
 }
 
 #[derive(Debug)]
 pub struct StringTable {
     data: Vec<u8>,
+    max_capacity: usize,
 }
 
 impl StringTable {
-    pub fn new(capacity: usize) -> Self {
+    pub fn new(capacity: usize, max_capacity: usize) -> Self {
         Self {
             data: Vec::with_capacity(capacity),
+            max_capacity,
         }
     }
 
@@ -22,7 +22,7 @@ impl StringTable {
         let needed = bytes.len() + 1;
         let capacity = self.data.capacity();
         if idx + needed > capacity {
-            if capacity * 2 > MAX_CAPACITY {
+            if capacity * 2 > self.max_capacity {
                 return AppendResult::CapacityExceeded;
             } else {
                 if let Err(_) = self.data.try_reserve_exact(capacity) {
@@ -36,12 +36,10 @@ impl StringTable {
             self.data.push(byte);
         }
 
-        AppendResult::Ok(idx as u32)
+        AppendResult::Ok(idx)
     }
 
-    pub fn get(&self, idx: u32) -> Option<&[u8]> {
-        let idx = idx as usize;
-
+    pub fn get(&self, idx: usize) -> Option<&[u8]> {
         let mut end = idx;
         while let Some(byte) = self.data.get(end) {
             if *byte == 0 {
@@ -62,7 +60,7 @@ impl StringTable {
 mod tests {
     use super::*;
 
-    fn unwrap_idx(res: AppendResult) -> u32 {
+    fn unwrap_idx(res: AppendResult) -> usize {
         match res {
             AppendResult::Ok(idx) => idx,
             AppendResult::CapacityExceeded => panic!("Capacity exceeded"),
@@ -71,7 +69,7 @@ mod tests {
 
     #[test]
     fn append_stores_string_and_null_terminates() {
-        let mut table = StringTable::new(5);
+        let mut table = StringTable::new(5, 5);
         let idx = unwrap_idx(table.append(b"abc")) as usize;
 
         assert_eq!(&table.data[idx..idx + 3], b"abc");
@@ -80,17 +78,7 @@ mod tests {
 
     #[test]
     fn append_multiple_strings_are_contiguous() {
-        let mut table = StringTable::new(10);
-        let a = unwrap_idx(table.append(b"a"));
-        let b = unwrap_idx(table.append(b"bb"));
-
-        assert_eq!(a, 0);
-        assert_eq!(b, 2);
-    }
-
-    #[test]
-    fn append_initial_capacity_exceeded_no_error() {
-        let mut table = StringTable::new(3);
+        let mut table = StringTable::new(10, 10);
         let a = unwrap_idx(table.append(b"a"));
         let b = unwrap_idx(table.append(b"bb"));
 
@@ -100,14 +88,14 @@ mod tests {
 
     #[test]
     fn get_string_correct_index() {
-        let mut table = StringTable::new(15);
+        let mut table = StringTable::new(15, 15);
         let a = unwrap_idx(table.append(b"a"));
         let b = unwrap_idx(table.append(b"bbbb"));
         let c = unwrap_idx(table.append(b"cc"));
 
-        let a_str = table.get(a as u32).unwrap();
-        let b_str = table.get(b as u32).unwrap();
-        let c_str = table.get(c as u32).unwrap();
+        let a_str = table.get(a).unwrap();
+        let b_str = table.get(b).unwrap();
+        let c_str = table.get(c).unwrap();
 
         assert_eq!(a_str, b"a");
         assert_eq!(b_str, b"bbbb");
@@ -116,27 +104,27 @@ mod tests {
 
     #[test]
     fn get_string_out_of_bounds_index() {
-        let table = StringTable::new(5);
-        let result = table.get(5);
+        let table = StringTable::new(5, 5);
+        let result = table.get(1);
 
         assert_eq!(result, None);
     }
 
     #[test]
     fn duplicate_strings_are_independent() {
-        let mut table = StringTable::new(10);
+        let mut table = StringTable::new(10, 10);
 
         let a1 = unwrap_idx(table.append(b"a"));
         let a2 = unwrap_idx(table.append(b"a"));
 
         assert_ne!(a1, a2);
-        assert_eq!(table.get(a1 as u32).unwrap(), b"a");
-        assert_eq!(table.get(a2 as u32).unwrap(), b"a");
+        assert_eq!(table.get(a1).unwrap(), b"a");
+        assert_eq!(table.get(a2).unwrap(), b"a");
     }
 
     #[test]
     fn more_capacity_reserved_when_not_enough_space() {
-        let mut table = StringTable::new(3);
+        let mut table = StringTable::new(3, 10);
 
         let r1 = table.append(b"a");
         let r2 = table.append(b"bb");
@@ -146,11 +134,13 @@ mod tests {
     }
 
     #[test]
-    fn capacity_not_exceeded_when_enough_space() {
-        let mut table = StringTable::new(10);
+    fn capacity_exceeded_when_expanding_exceeds_max() {
+        let mut table = StringTable::new(3, 5);
 
-        let r = table.append(b"abc");
+        let r1 = table.append(b"a");
+        let r2 = table.append(b"bb");
 
-        assert!(matches!(r, AppendResult::Ok(_)));
+        assert!(matches!(r1, AppendResult::Ok(_)));
+        assert!(matches!(r2, AppendResult::CapacityExceeded));
     }
 }
