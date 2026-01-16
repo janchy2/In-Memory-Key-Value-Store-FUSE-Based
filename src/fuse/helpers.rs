@@ -18,6 +18,7 @@ pub fn create_file_attr(ino: u64, kv_store: &KVStore) -> Result<FileAttr, Error>
     let mut size = 0;
     let kind;
     let nlink;
+    let perm;
 
     let entry = get_entry_for_ino(ino, kv_store);
     match entry {
@@ -29,11 +30,13 @@ pub fn create_file_attr(ino: u64, kv_store: &KVStore) -> Result<FileAttr, Error>
             let idx = ino_to_idx(ino);
             let children = kv_store.get_children_keys_idx_and_names(idx);
             nlink = 2 + children.len() as u32;
+            perm = 0o755;
         }
         Entry::Value(value) => {
             kind = FileType::RegularFile;
             size = value.len() as u64;
             nlink = 1;
+            perm = 0o644;
         }
     }
 
@@ -48,10 +51,10 @@ pub fn create_file_attr(ino: u64, kv_store: &KVStore) -> Result<FileAttr, Error>
         ctime: SystemTime::now(),
         crtime: SystemTime::now(),
         kind: kind,
-        perm: 0o755,
+        perm: perm,
         nlink: nlink,
-        uid: unsafe { libc::getuid() },
-        gid: unsafe { libc::getgid() },
+        uid: 0,
+        gid: 0,
         rdev: 0,
         flags: 0,
         blksize: 512,
