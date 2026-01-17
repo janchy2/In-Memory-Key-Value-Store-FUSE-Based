@@ -17,12 +17,18 @@ pub enum RemoveResult {
     Removed,
 }
 
+pub enum InsertResult {
+    Inserted(usize),
+    AlreadyExists(usize),
+}
+
 pub struct KVStore {
     key_table: Rc<RefCell<StringTable>>,
     value_table: Rc<RefCell<StringTable>>,
     key_value_map: BTreeMap<KeyRef, Option<usize>>,
     // Reserved keys and their values are reinserted after key_value_map is cleared on eviction.
-    // They are not guaranteed to have the same index when reinserted.
+    // They are not guaranteed to have the same index when reinserted unless they are the first keys inserted
+    // after KVStore creation.
     reserved_keys: Vec<KeyRef>,
 }
 
@@ -49,8 +55,8 @@ impl KVStore {
         value: Option<&str>,
     ) -> bool {
         let idx = match self.insert_key(parent_parent_idx, parent, key) {
-            Some(idx) => idx,
-            None => {
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => {
                 return false;
             }
         };
@@ -79,10 +85,10 @@ impl KVStore {
         parent_parent_idx: usize,
         parent: usize,
         key: &str,
-    ) -> Option<usize> {
+    ) -> InsertResult {
         let temp_key = self.form_key_ref_from_str(parent, key);
-        if let Some(_) = self.get_key_in_map(&temp_key) {
-            return None;
+        if let Some(key_ref) = self.get_key_in_map(&temp_key) {
+            return InsertResult::AlreadyExists(key_ref.get_idx());
         }
         let bytes = key.as_bytes();
         let append_result = self.key_table.borrow_mut().append(bytes);
@@ -100,7 +106,7 @@ impl KVStore {
             self.key_value_map.remove(&temp_key);
             self.key_value_map.insert(second_key_ref, None);
         }
-        Some(idx)
+        InsertResult::Inserted(idx)
     }
 
     pub fn insert_value(&mut self, parent: usize, idx: usize, value: &[u8]) -> bool {
@@ -316,7 +322,7 @@ impl KVStore {
 
 #[cfg(test)]
 mod tests {
-    use std::{thread::sleep, time::Duration};
+use std::{thread::sleep, time::Duration};
 
     use super::*;
 
@@ -324,28 +330,52 @@ mod tests {
     fn insert_key_and_lookup_by_string() {
         let mut store = KVStore::new(10, 10, 10);
 
-        let idx = store.insert_key(1, 1, "a").expect("Insert should succeed");
+        let idx = match store.insert_key(0, 0, "a") {
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => panic!("Expected Inserted"),
+        };
 
-        assert_eq!(store.get_idx_for_key_str(1, "a"), Some(idx));
+        assert_eq!(store.get_idx_for_key_str(0, "a"), Some(idx));
     }
 
     #[test]
     fn duplicate_key_under_same_parent_is_rejected() {
         let mut store = KVStore::new(10, 10, 10);
 
-        assert!(store.insert_key(1, 1, "a").is_some());
-        assert!(store.insert_key(1, 1, "a").is_none());
+        let idx = match store.insert_key(0, 0, "a") {
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => panic!("Expected Inserted"),
+        };
+
+        match store.insert_key(0, 0, "a") {
+            InsertResult::Inserted(_) => panic!("Expected AlreadyExists"),
+            InsertResult::AlreadyExists(existing_idx) => {
+                assert_eq!(existing_idx, idx);
+            }
+        }
     }
 
     #[test]
     fn same_key_name_under_different_parents_is_allowed() {
         let mut store = KVStore::new(10, 10, 10);
 
-        let a = store.insert_key(1, 1, "a").unwrap();
-        let b = store.insert_key(1, 1, "b").unwrap();
+        let a: usize = match store.insert_key(0, 0, "a") {
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => panic!("Expected Inserted"),
+        };
+        let b: usize = match store.insert_key(0, 0, "b") {
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => panic!("Expected Inserted"),
+        };
 
-        let a1 = store.insert_key(1, a, "x").unwrap();
-        let b1 = store.insert_key(1, b, "x").unwrap();
+        let a1: usize = match store.insert_key(0, a, "x") {
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => panic!("Expected Inserted"),
+        };
+        let b1: usize = match store.insert_key(0, b, "x") {
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => panic!("Expected Inserted"),
+        };
 
         assert_ne!(a1, b1);
     }
@@ -354,10 +384,13 @@ mod tests {
     fn insert_value_and_retrieve_it() {
         let mut store = KVStore::new(10, 10, 10);
 
-        let idx = store.insert_key(1, 1, "file").unwrap();
-        assert!(store.insert_value(1, idx, b"hello"));
+        let idx: usize = match store.insert_key(0, 0, "file") {
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => panic!("Expected Inserted"),
+        };
+        assert!(store.insert_value(0, idx, b"hello"));
 
-        match store.get_value_for_key_idx(1, idx) {
+        match store.get_value_for_key_idx(0, idx) {
             Entry::Value(v) => assert_eq!(v, "hello"),
             _ => panic!("Expected value"),
         }
@@ -367,7 +400,10 @@ mod tests {
     fn get_children_of_key() {
         let mut store = KVStore::new(10, 10, 10);
 
-        let idx = store.insert_key(1, 1, "key").unwrap();
+        let idx: usize = match store.insert_key(0, 0, "key") {
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => panic!("Expected Inserted"),
+        };
         store.insert_key(0, idx, "a");
         store.insert_key(0, idx, "b");
         store.insert_key(0, idx, "c");
@@ -382,19 +418,31 @@ mod tests {
     fn parent_parent_idx_is_correct() {
         let mut store = KVStore::new(10, 10, 10);
 
-        let a = store.insert_key(1, 1, "a").unwrap();
-        let b = store.insert_key(1, a, "b").unwrap();
+        let a: usize = match store.insert_key(0, 0, "a") {
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => panic!("Expected Inserted"),
+        };
+        let b: usize = match store.insert_key(0, a, "b") {
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => panic!("Expected Inserted"),
+        };
 
         let ppi = store.get_parent_parent_idx(a, b).unwrap();
-        assert_eq!(ppi, 1);
+        assert_eq!(ppi, 0);
     }
 
     #[test]
     fn remove_leaf_key() {
         let mut store = KVStore::new(10, 10, 10);
 
-        let a = store.insert_key(1, 1, "a").unwrap();
-        let b = store.insert_key(1, a, "b").unwrap();
+        let a: usize = match store.insert_key(0, 0, "a") {
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => panic!("Expected Inserted"),
+        };
+        let b: usize = match store.insert_key(0, a, "b") {
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => panic!("Expected Inserted"),
+        };
 
         assert!(matches!(
             store.remove_key_str(a, "b"),
@@ -408,11 +456,14 @@ mod tests {
     fn remove_key_with_children_fails() {
         let mut store = KVStore::new(10, 10, 10);
 
-        let a = store.insert_key(1, 1, "a").unwrap();
-        store.insert_key(1, a, "b");
+        let a: usize = match store.insert_key(0, 0, "a") {
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => panic!("Expected Inserted"),
+        };
+        store.insert_key(0, a, "b");
 
         assert!(matches!(
-            store.remove_key_str(1, "a"),
+            store.remove_key_str(0, "a"),
             RemoveResult::HasChildren
         ));
     }
@@ -422,7 +473,7 @@ mod tests {
         let mut store = KVStore::new(10, 10, 10);
 
         assert!(matches!(
-            store.remove_key_str(1, "missing"),
+            store.remove_key_str(0, "missing"),
             RemoveResult::NotFound
         ));
     }
@@ -431,26 +482,32 @@ mod tests {
     fn expired_key_is_not_found_by_lookup() {
         let mut store = KVStore::new(10, 10, 10);
 
-        let idx = store.insert_key(1, 1, "temp").unwrap();
-        store.insert_value(1, idx, b"value");
+        let idx: usize = match store.insert_key(0, 0, "temp") {
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => panic!("Expected Inserted"),
+        };
+        store.insert_value(0, idx, b"value");
 
         let expired_at = SystemTime::now() - Duration::from_secs(1);
-        assert!(store.set_expiration(1, idx, Some(expired_at)));
+        assert!(store.set_expiration(0, idx, Some(expired_at)));
 
-        assert_eq!(store.get_idx_for_key_str(1, "temp"), None);
+        assert_eq!(store.get_idx_for_key_str(0, "temp"), None);
     }
 
     #[test]
     fn expired_key_returns_not_found_on_get_value() {
         let mut store = KVStore::new(10, 10, 10);
 
-        let idx = store.insert_key(1, 1, "temp").unwrap();
+        let idx: usize = match store.insert_key(0, 0, "temp") {
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => panic!("Expected Inserted"),
+        };
         store.insert_value(1, idx, b"value");
 
         let expired_at = SystemTime::now() - Duration::from_secs(1);
-        store.set_expiration(1, idx, Some(expired_at));
+        store.set_expiration(0, idx, Some(expired_at));
 
-        match store.get_value_for_key_idx(1, idx) {
+        match store.get_value_for_key_idx(0, idx) {
             Entry::NotFound => {}
             _ => panic!("Expired key must behave as NotFound"),
         }
@@ -460,12 +517,15 @@ mod tests {
     fn expired_key_is_not_listed_as_child() {
         let mut store = KVStore::new(10, 10, 10);
 
-        let idx = store.insert_key(1, 1, "child").unwrap();
+        let idx: usize = match store.insert_key(0, 0, "child") {
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => panic!("Expected Inserted"),
+        };
 
         let expired_at = SystemTime::now() - Duration::from_secs(1);
-        store.set_expiration(1, idx, Some(expired_at));
+        store.set_expiration(0, idx, Some(expired_at));
 
-        let children = store.get_children_keys_idx_and_names(1);
+        let children = store.get_children_keys_idx_and_names(0);
         assert!(children.is_empty());
     }
 
@@ -473,39 +533,45 @@ mod tests {
     fn ttl_is_preserved_when_value_is_overwritten() {
         let mut store = KVStore::new(10, 10, 10);
 
-        let idx = store.insert_key(1, 1, "file").unwrap();
-        store.insert_value(1, idx, b"old");
+        let idx: usize = match store.insert_key(0, 0, "file") {
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => panic!("Expected Inserted"),
+        };
+        store.insert_value(0, idx, b"old");
 
         let expires_at = SystemTime::now() + Duration::from_secs(3);
-        store.set_expiration(1, idx, Some(expires_at));
+        store.set_expiration(0, idx, Some(expires_at));
 
-        store.insert_value(1, idx, b"new");
+        store.insert_value(0, idx, b"new");
 
-        assert_eq!(store.get_idx_for_key_str(1, "file"), Some(idx));
+        assert_eq!(store.get_idx_for_key_str(0, "file"), Some(idx));
 
-        match store.get_value_for_key_idx(1, idx) {
+        match store.get_value_for_key_idx(0, idx) {
             Entry::Value(v) => assert_eq!(v, "new"),
             _ => panic!("Expected updated value"),
         }
 
         sleep(Duration::from_secs(3));
 
-        assert_eq!(store.get_idx_for_key_str(1, "file"), None);
+        assert_eq!(store.get_idx_for_key_str(0, "file"), None);
     }
 
     #[test]
     fn non_expired_key_is_visible() {
         let mut store = KVStore::new(10, 10, 10);
 
-        let idx = store.insert_key(1, 1, "alive").unwrap();
-        store.insert_value(1, idx, b"ok");
+        let idx: usize = match store.insert_key(0, 0, "alive") {
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => panic!("Expected Inserted"),
+        };
+        store.insert_value(0, idx, b"ok");
 
         let expires_at = SystemTime::now() + Duration::from_secs(60);
-        store.set_expiration(1, idx, Some(expires_at));
+        store.set_expiration(0, idx, Some(expires_at));
 
-        assert_eq!(store.get_idx_for_key_str(1, "alive"), Some(idx));
+        assert_eq!(store.get_idx_for_key_str(0, "alive"), Some(idx));
 
-        match store.get_value_for_key_idx(1, idx) {
+        match store.get_value_for_key_idx(0, idx) {
             Entry::Value(v) => assert_eq!(v, "ok"),
             _ => panic!("Expected value for non-expired key"),
         }
@@ -514,20 +580,22 @@ mod tests {
     #[test]
     fn can_reinsert_key_with_same_name_after_expiration() {
         let mut store = KVStore::new(10, 10, 10);
-        let idx1 = store
-            .insert_key(1, 1, "temp")
-            .expect("initial insert must succeed");
+        let idx1: usize = match store.insert_key(0, 0, "temp") {
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => panic!("Expected Inserted"),
+        };
 
         let expires_at = SystemTime::now() + Duration::from_millis(50);
-        assert!(store.set_expiration(1, idx1, Some(expires_at)));
+        assert!(store.set_expiration(0, idx1, Some(expires_at)));
 
         sleep(Duration::from_millis(80));
-        assert_eq!(store.get_idx_for_key_str(1, "temp"), None);
+        assert_eq!(store.get_idx_for_key_str(0, "temp"), None);
 
-        let idx2 = store
-            .insert_key(1, 1, "temp")
-            .expect("Reinserting expired key should succeed");
-        assert_eq!(store.get_idx_for_key_str(1, "temp"), Some(idx2));
+        let idx2: usize = match store.insert_key(0, 0, "temp") {
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => panic!("Reinserting expired key should succeed"),
+        };
+        assert_eq!(store.get_idx_for_key_str(0, "temp"), Some(idx2));
     }
 
     #[test]
@@ -544,12 +612,12 @@ mod tests {
 
         match store.get_value_for_key_idx(0, idx1) {
             Entry::Value(v) => assert_eq!(v, "val1"),
-            _ => panic!("Expected value for rkey1"),
+            _ => panic!("Expected value"),
         }
 
         match store.get_value_for_key_idx(0, idx2) {
             Entry::NoValue => {}
-            _ => panic!("Expected no value for rkey2"),
+            _ => panic!("Expected no value"),
         }
     }
 }

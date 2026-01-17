@@ -15,11 +15,11 @@ use crate::{
     fuse::{
         helpers::{
             create_file_attr, get_child_ino_and_file_type, get_entry_for_ino, osstr_to_name,
-            parse_ttl,
+            parse_ttl, try_get_value_from_hook,
         },
         inode::{form_ino, ino_to_idx, ino_to_parent_idx},
     },
-    kv::store::{Entry, KVStore, RemoveResult},
+    kv::store::{Entry, InsertResult, KVStore, RemoveResult},
 };
 
 const TTL: Duration = Duration::from_secs(1);
@@ -27,6 +27,7 @@ const ROOT_INDEX: usize = 1;
 
 pub struct KVFS {
     kv_store: Arc<RwLock<KVStore>>,
+    hooks_path: String,
 }
 
 impl KVFS {
@@ -46,7 +47,11 @@ impl KVFS {
             panic!("Registering reserved keys failed");
         }
         drop(guard);
-        Self { kv_store }
+        let hooks_path = config.hooks_path.clone();
+        Self {
+            kv_store,
+            hooks_path,
+        }
     }
 
     pub fn mount(config: &KvConfig) -> Result<(), std::io::Error> {
@@ -70,7 +75,6 @@ impl Filesystem for KVFS {
             match create_file_attr(ino, &guard) {
                 Ok(ok_attr) => ok_attr,
                 Err(_) => {
-                    println!("No entry");
                     reply.error(libc::ENOENT);
                     return;
                 }
@@ -105,8 +109,8 @@ impl Filesystem for KVFS {
     }
 
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        let key_str = match osstr_to_name(name) {
-            Ok(s) => s,
+        let key = match osstr_to_name(name) {
+            Ok(k) => k,
             Err(e) => {
                 reply.error(e);
                 return;
@@ -114,24 +118,47 @@ impl Filesystem for KVFS {
         };
 
         let parent_idx = ino_to_idx(parent);
+        {
+            let guard = self.kv_store.read().unwrap();
+            if let Some(idx) = guard.get_idx_for_key_str(parent_idx, key) {
+                let ino = form_ino(parent_idx, idx);
+                let attr = match create_file_attr(ino, &guard) {
+                    Ok(ok_attr) => ok_attr,
+                    Err(_) => panic!("Key not found, but it should exist"),
+                };
+                reply.entry(&TTL, &attr, 0);
+                return;
+            }
+        }
 
-        let guard = self.kv_store.read().unwrap();
-
-        let key_idx = match guard.get_idx_for_key_str(parent_idx, key_str) {
-            Some(idx) => idx,
+        // When a looked up key does not exist, an executable file with the same name is looked for in the given hooks directory.
+        // If it exists, the value it produces is saved in the key-value store for the given key.
+        let value = match try_get_value_from_hook(key, &self.hooks_path) {
+            Some(v) => v,
             None => {
                 reply.error(libc::ENOENT);
                 return;
             }
         };
 
-        let ino = form_ino(parent_idx, key_idx);
+        let parent_parent_idx = ino_to_parent_idx(parent);
+        let mut guard = self.kv_store.write().unwrap();
+        let idx = {
+            match guard.insert_key(parent_parent_idx, parent_idx, key) {
+                InsertResult::AlreadyExists(idx) => idx,
+                InsertResult::Inserted(idx) => {
+                    if !guard.insert_value(parent_idx, idx, value.as_bytes()) {
+                        panic!("Failed to insert hook value");
+                    }
+                    idx
+                }
+            }
+        };
+
+        let ino = form_ino(parent_idx, idx);
         let attr = match create_file_attr(ino, &guard) {
             Ok(ok_attr) => ok_attr,
-            Err(_) => {
-                reply.error(libc::ENOENT);
-                return;
-            }
+            Err(_) => panic!("Key not found, but it should exist"),
         };
         reply.entry(&TTL, &attr, 0);
     }
@@ -232,8 +259,8 @@ impl Filesystem for KVFS {
         let parent_idx = ino_to_idx(parent);
         let parent_parent_idx = ino_to_parent_idx(parent);
         let idx = match guard.insert_key(parent_parent_idx, parent_idx, key_str) {
-            Some(idx) => idx,
-            None => return reply.error(libc::EEXIST),
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => return reply.error(libc::EEXIST),
         };
 
         let ino = form_ino(parent_idx, idx);
@@ -295,8 +322,8 @@ impl Filesystem for KVFS {
         let parent_idx = ino_to_idx(parent);
         let parent_parent_idx = ino_to_parent_idx(parent);
         let idx = match guard.insert_key(parent_parent_idx, parent_idx, key_str) {
-            Some(idx) => idx,
-            None => return reply.error(libc::EEXIST),
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => return reply.error(libc::EEXIST),
         };
 
         if !guard.insert_value(parent_idx, idx, &[]) {

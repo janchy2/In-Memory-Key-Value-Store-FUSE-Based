@@ -1,5 +1,7 @@
 use std::{
     ffi::OsStr,
+    path::Path,
+    process::Command,
     time::{Duration, SystemTime},
 };
 
@@ -94,4 +96,21 @@ pub fn parse_ttl(value: &[u8]) -> Result<Option<SystemTime>, i32> {
     }
 
     Ok(Some(SystemTime::now() + Duration::from_secs(ttl_secs)))
+}
+
+pub fn try_get_value_from_hook(key_str: &str, hooks_path: &str) -> Option<String> {
+    let script_path = Path::new(hooks_path).join(key_str);
+
+    if !script_path.is_file() {
+        return None;
+    }
+
+    let output = Command::new(&script_path).output().ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    Some(stdout.trim_end().to_string())
 }
