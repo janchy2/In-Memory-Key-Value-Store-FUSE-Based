@@ -1,6 +1,6 @@
 mod config;
-pub mod fuse;
-pub mod kv;
+mod fuse;
+mod kv;
 
 use clap::Parser;
 
