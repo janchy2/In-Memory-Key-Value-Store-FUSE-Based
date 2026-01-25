@@ -1,7 +1,6 @@
 use std::{
     cell::RefCell,
     cmp::Ordering,
-    hash::{Hash, Hasher},
     rc::Rc,
     time::SystemTime,
 };
@@ -91,16 +90,6 @@ impl PartialEq for KeyRef {
 
 impl Eq for KeyRef {}
 
-impl Hash for KeyRef {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.table
-            .borrow()
-            .get(self.idx)
-            .expect("The string index should be valid")
-            .hash(state);
-        self.parent.hash(state);
-    }
-}
 
 impl Ord for KeyRef {
     fn cmp(&self, other: &Self) -> Ordering {
@@ -133,7 +122,6 @@ mod tests {
     use std::{
         cell::RefCell,
         cmp::Ordering,
-        hash::{DefaultHasher, Hash, Hasher},
         rc::Rc,
     };
 
@@ -202,43 +190,6 @@ mod tests {
     }
 
     #[test]
-    fn equal_string_and_parent_have_same_hash() {
-        let table = Rc::new(RefCell::new(StringTable::new(10, 10)));
-
-        let a1 = unwrap_idx(table.borrow_mut().append(b"abc"));
-        let a2 = unwrap_idx(table.borrow_mut().append(b"abc"));
-
-        let sr1 = KeyRef::new(Rc::clone(&table), a1, 1, 0);
-        let sr2 = KeyRef::new(Rc::clone(&table), a2, 1, 0);
-
-        let mut h1 = DefaultHasher::new();
-        let mut h2 = DefaultHasher::new();
-
-        sr1.hash(&mut h1);
-        sr2.hash(&mut h2);
-
-        assert_eq!(h1.finish(), h2.finish());
-    }
-
-    #[test]
-    fn different_parent_changes_hash() {
-        let table = Rc::new(RefCell::new(StringTable::new(10, 10)));
-
-        let a = unwrap_idx(table.borrow_mut().append(b"abc"));
-
-        let sr1 = KeyRef::new(Rc::clone(&table), a, 0, 0);
-        let sr2 = KeyRef::new(Rc::clone(&table), a, 1, 0);
-
-        let mut h1 = DefaultHasher::new();
-        let mut h2 = DefaultHasher::new();
-
-        sr1.hash(&mut h1);
-        sr2.hash(&mut h2);
-
-        assert_ne!(h1.finish(), h2.finish());
-    }
-
-    #[test]
     fn same_parent_compares_by_string() {
         let table = Rc::new(RefCell::new(StringTable::new(5, 5)));
 
@@ -301,24 +252,5 @@ mod tests {
         let r2 = KeyRef::new(Rc::clone(&table), b, 1, 999);
 
         assert!(r1 < r2);
-    }
-
-    #[test]
-    fn parent_parent_idx_does_not_affect_hash() {
-        let table = Rc::new(RefCell::new(StringTable::new(10, 10)));
-
-        let a1 = unwrap_idx(table.borrow_mut().append(b"x"));
-        let a2 = unwrap_idx(table.borrow_mut().append(b"x"));
-
-        let r1 = KeyRef::new(Rc::clone(&table), a1, 5, 1);
-        let r2 = KeyRef::new(Rc::clone(&table), a2, 5, 999);
-
-        let mut h1 = DefaultHasher::new();
-        let mut h2 = DefaultHasher::new();
-
-        r1.hash(&mut h1);
-        r2.hash(&mut h2);
-
-        assert_eq!(h1.finish(), h2.finish());
     }
 }
