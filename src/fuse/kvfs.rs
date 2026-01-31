@@ -60,7 +60,6 @@ impl KVFS {
         let options = [
             MountOption::FSName("kvfs".to_string()),
             MountOption::AutoUnmount,
-            MountOption::AllowRoot,
         ];
 
         mount2(fs, &config.mountpoint, &options)
