@@ -1,9 +1,4 @@
-use std::{
-    cell::RefCell,
-    cmp::Ordering,
-    rc::Rc,
-    time::SystemTime,
-};
+use std::{cell::RefCell, cmp::Ordering, rc::Rc, time::SystemTime};
 
 use super::string_table::StringTable;
 
@@ -90,7 +85,6 @@ impl PartialEq for KeyRef {
 
 impl Eq for KeyRef {}
 
-
 impl Ord for KeyRef {
     fn cmp(&self, other: &Self) -> Ordering {
         match self.parent.cmp(&other.parent) {
@@ -119,11 +113,7 @@ impl PartialOrd for KeyRef {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        cell::RefCell,
-        cmp::Ordering,
-        rc::Rc,
-    };
+    use std::{cell::RefCell, cmp::Ordering, rc::Rc};
 
     use crate::kv::string_table::AppendResult;
 

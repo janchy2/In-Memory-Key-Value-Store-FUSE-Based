@@ -14,21 +14,21 @@ pub enum ConfigError {
 #[command(name = "kvfs")]
 #[command(about = "In-memory key-value FUSE filesystem")]
 pub struct Args {
-    /// Mount point for the filesystem
+    // Mount point for the filesystem
     mountpoint: String,
 
     // Path to directory where hooks are stored, must be outside the mountpoint
     hooks_path: String,
 
-    /// Initial capacity of the key string table (bytes)
+    // Initial capacity of the key string table (bytes)
     #[arg(long, default_value_t = 64 * 1024)]
     key_capacity: usize,
 
-    /// Initial capacity of the value string table (bytes)
+    // Initial capacity of the value string table (bytes)
     #[arg(long, default_value_t = 4 * 1024 * 1024)]
     value_capacity: usize,
 
-    /// Maximum allowed string table capacity
+    // Maximum allowed string table capacity
     #[arg(long, default_value_t = 256 * 1024 * 1024)]
     max_capacity: usize,
 }

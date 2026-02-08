@@ -111,18 +111,37 @@ impl KVStore {
 
     pub fn insert_value(&mut self, parent: usize, idx: usize, value: &[u8]) -> bool {
         let key = KeyRef::new(self.key_table.clone(), idx, parent, 0);
-        if let None = self.get_key_in_map(&key) {
+        let key_in_map = self.get_key_in_map(&key);
+        if key_in_map.is_none() {
             return false;
         }
+
+        // Get the key string and parent_parent_idx before potential eviction
+        let key_str = self.get_key_str(key_in_map.unwrap());
+        let parent_parent_idx = key_in_map.unwrap().get_parent_parent_idx();
+
         let append_result = self.value_table.borrow_mut().append(value);
-        let value_idx = match append_result {
-            AppendResult::Ok(idx) => idx,
+        let (value_idx, actual_key_idx) = match append_result {
+            AppendResult::Ok(value_idx) => (value_idx, idx),
             AppendResult::CapacityExceeded => {
                 self.evict_all();
-                Self::expect_append_ok(self.key_table.borrow_mut().append(value))
+
+                // After eviction, the key is gone, so we need to re-insert it
+                let new_key_idx = match self.insert_key(parent_parent_idx, parent, &key_str) {
+                    InsertResult::Inserted(new_idx) => new_idx,
+                    InsertResult::AlreadyExists(existing_idx) => {
+                        // This could happen if it was a reserved key
+                        existing_idx
+                    }
+                };
+
+                let value_idx = Self::expect_append_ok(self.value_table.borrow_mut().append(value));
+                (value_idx, new_key_idx)
             }
         };
-        if let Some(v) = self.key_value_map.get_mut(&key) {
+
+        let current_key = KeyRef::new(self.key_table.clone(), actual_key_idx, parent, 0);
+        if let Some(v) = self.key_value_map.get_mut(&current_key) {
             *v = Some(value_idx);
             true
         } else {
@@ -322,7 +341,7 @@ impl KVStore {
 
 #[cfg(test)]
 mod tests {
-use std::{thread::sleep, time::Duration};
+    use std::{thread::sleep, time::Duration};
 
     use super::*;
 
@@ -618,6 +637,37 @@ use std::{thread::sleep, time::Duration};
         match store.get_value_for_key_idx(0, idx2) {
             Entry::NoValue => {}
             _ => panic!("Expected no value"),
+        }
+    }
+
+    #[test]
+    fn insert_value_triggers_eviction_and_reinserts_key() {
+        let mut store = KVStore::new(8, 8, 8);
+
+        let parent_parent_idx = 0;
+        let parent_idx = 0;
+        let key_name = "key1";
+
+        let key_idx = match store.insert_key(parent_parent_idx, parent_idx, key_name) {
+            InsertResult::Inserted(idx) => idx,
+            InsertResult::AlreadyExists(_) => panic!("Key should not exist yet"),
+        };
+
+        let ok = store.insert_value(parent_idx, key_idx, b"1234");
+        assert!(ok, "Initial insert_value should succeed");
+
+        let ok = store.insert_value(parent_idx, key_idx, b"ABCDE");
+        assert!(ok, "Insert_value should succeed even after eviction");
+
+        let entry = store.get_value_for_key_str(parent_idx, key_name);
+        match entry {
+            Entry::Value(v) => {
+                assert_eq!(
+                    v, "ABCDE",
+                    "Value after eviction should be the new value"
+                );
+            }
+            _ => panic!("Key should exist with a value after eviction"),
         }
     }
 }
